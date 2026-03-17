@@ -126,7 +126,7 @@ idx_vps_maker() {
     echo ""
 
     if command -v curl >/dev/null 2>&1; then
-        if bash <(curl -s https://raw.githubusercontent.com/mahimxyzz/vps123/refs/heads/main/script); then
+        if bash <(curl -s https://raw.githubusercontent.com/NotRayy01/hosting/refs/heads/main/vm.sh); then
             ok "Cloud VM Manager session completed successfully."
         else
             err "Failed to fetch or execute the script."
