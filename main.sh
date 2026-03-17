@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# 🚀 Ray Master Control Center (Pro Edition)
+# 🚀 Ray Master Control Center
 # ==============================================================================
 # 👑 Developed by Ray
 # 🏢 Ray Industries | 📺 YouTube: @RayVerse
@@ -13,14 +13,14 @@ IFS=$'\n\t'
 # ==============================================================================
 # 🎨 UI & STYLING (Ray's Signature Style)
 # ==============================================================================
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-MAGENTA='\033[0;35m'
-CYAN='\033[0;36m'
-NC='\033[0m' # No Color
-BOLD='\033[1m'
+RED="\033[0;31m"
+GREEN="\033[0;32m"
+YELLOW="\033[1;33m"
+BLUE="\033[0;34m"
+MAGENTA="\033[0;35m"
+CYAN="\033[0;36m"
+NC="\033[0m" # No Color
+BOLD="\033[1m"
 
 ok() { echo -e "${GREEN}✅ $1${NC}"; }
 info() { echo -e "${CYAN}ℹ️  $1${NC}"; }
@@ -44,17 +44,11 @@ show_banner() {
 }
 
 # ==============================================================================
-# 🌐 GITHUB REPOSITORY CONFIGURATION
-# ==============================================================================
-BASE_URL="https://raw.githubusercontent.com/NotRayy01/hosting/refs/heads/main"
-
-# ==============================================================================
 # 🛠️ REMOTE EXECUTION ENGINE
 # ==============================================================================
 run_remote_script() {
-    local script_name="$1"
+    local target_url="$1"
     local title="$2"
-    local target_url="${BASE_URL}/${script_name}"
 
     show_banner
     echo -e "${MAGENTA}--- 📡 Launching: $title ---${NC}"
@@ -106,8 +100,7 @@ while true; do
     read -p "Select Option [0-10]: " choice
 
     case "$choice" in
-        # Mapped exactly to your GitHub repository files
-        1) run_remote_script "https://raw.githubusercontent.com/NotRayy01/hosting/refs/heads/main/panel.sh "Pterodactyl Panel Installer" ;;
+        1) run_remote_script "https://raw.githubusercontent.com/NotRayy01/hosting/refs/heads/main/panel.sh" "Pterodactyl Panel Installer" ;;
         2) run_remote_script "https://raw.githubusercontent.com/NotRayy01/hosting/refs/heads/main/wings.sh" "Pterodactyl Wings Installer" ;;
         3) run_remote_script "https://raw.githubusercontent.com/NotRayy01/hosting/refs/heads/main/ptroupdate.sh" "Pterodactyl Panel Updater" ;;
         4) run_remote_script "https://raw.githubusercontent.com/NotRayy01/hosting/refs/heads/main/ptrouninstall" "Pterodactyl Uninstaller" ;;
@@ -124,7 +117,7 @@ while true; do
             echo -e "${GREEN}${BOLD}================================================================${NC}"
             echo ""
             info "Thank you for using the Ray Master Control Center!"
-            info "Don't forget to subscribe to @RayVerse! 🚀"
+            info "Do not forget to subscribe to @RayVerse! 🚀"
             echo ""
             exit 0
             ;;
