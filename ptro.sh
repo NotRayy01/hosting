@@ -89,13 +89,13 @@ while true; do
     read -p "Select option [0-10]: " choice
 
     case "$choice" in
-        1) run_remote_script "https://raw.githubusercontent.com/mahimxyzz/Vps/refs/heads/main/cd/panel2.sh" "PANEL INSTALLATION" ;;
-        2) run_remote_script "https://raw.githubusercontent.com/mahimxyzz/Vps/refs/heads/main/cd/wing2.sh" "WINGS INSTALLATION" ;;
-        3) run_remote_script "https://raw.githubusercontent.com/mahimxyzz/Vps/refs/heads/main/cd/update2.sh" "PANEL UPDATE" ;;
-        4) run_remote_script "https://raw.githubusercontent.com/mahimxyzz/Vps/refs/heads/main/cd/uninstall2.sh" "UNINSTALL TOOLS" ;;
-        5) run_remote_script "https://raw.githubusercontent.com/mahimxyzz/Vps/refs/heads/main/cd/Blueprint2.sh" "BLUEPRINT SETUP" ;;
-        6) run_remote_script "https://raw.githubusercontent.com/mahimxyzz/Vps/refs/heads/main/cd/cloudflare.sh" "CLOUDFLARE SETUP" ;;
-        7) run_remote_script "https://raw.githubusercontent.com/mahimxyzz/Vps/refs/heads/main/cd/th2.sh" "THEME CHANGER" ;;
+        1) run_remote_script "https://raw.githubusercontent.com/NotRayy01/hosting/refs/heads/main/panel.sh" "PANEL INSTALLATION" ;;
+        2) run_remote_script "https://raw.githubusercontent.com/NotRayy01/hosting/refs/heads/main/wings.sh" "WINGS INSTALLATION" ;;
+        3) run_remote_script "https://raw.githubusercontent.com/NotRayy01/hosting/refs/heads/main/ptroupdate.sh" "PANEL UPDATE" ;;
+        4) run_remote_script "https://raw.githubusercontent.com/NotRayy01/hosting/refs/heads/main/ptrouninstall" "UNINSTALL TOOLS" ;;
+        5) run_remote_script "https://raw.githubusercontent.com/NotRayy01/hosting/refs/heads/main/blueprint.sh" "BLUEPRINT SETUP" ;;
+        6) run_remote_script "https://raw.githubusercontent.com/NotRayy01/hosting/refs/heads/main/cloudflare.sh" "CLOUDFLARE SETUP" ;;
+        7) run_remote_script "https://raw.githubusercontent.com/NotRayy01/hosting/refs/heads/main/nebula.sh" "THEME CHANGER" ;;
         
         8)
             show_banner
