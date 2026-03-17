@@ -152,7 +152,7 @@ github_vm_installer() {
 
     if command -v curl >/dev/null 2>&1; then
         # NOTE: Replace the URL below with your actual GitHub VM script URL if different
-        if bash <(curl -s https://raw.githubusercontent.com/mahimxyzz/vps123/refs/heads/main/github_vm); then
+        if bash <(curl -s https://raw.githubusercontent.com/NotRayy01/hosting/refs/heads/main/github_vm.sh); then
             ok "GitHub VM Installation completed successfully."
         else
             err "Failed to fetch or execute the GitHub VM script."
