@@ -107,16 +107,16 @@ while true; do
 
     case "$choice" in
         # Mapped exactly to your GitHub repository files
-        1) run_remote_script "panel.sh" "Pterodactyl Panel Installer" ;;
-        2) run_remote_script "wings.sh" "Pterodactyl Wings Installer" ;;
-        3) run_remote_script "ptroupdate.sh" "Pterodactyl Panel Updater" ;;
-        4) run_remote_script "ptrouninstall" "Pterodactyl Uninstaller" ;;
-        5) run_remote_script "ptro.sh" "Pterodactyl Manager Menu" ;;
-        6) run_remote_script "blueprint.sh" "Blueprint Framework Installer" ;;
-        7) run_remote_script "nebula.sh" "Nebula Theme Installer" ;;
-        8) run_remote_script "vm.sh" "Cloud VM Manager" ;;
-        9) run_remote_script "vmcreate.sh" "Cloud VM Creator" ;;
-        10) run_remote_script "cloudflare.sh" "Cloudflared Installer" ;;
+        1) run_remote_script "https://raw.githubusercontent.com/NotRayy01/hosting/refs/heads/main/panel.sh "Pterodactyl Panel Installer" ;;
+        2) run_remote_script "https://raw.githubusercontent.com/NotRayy01/hosting/refs/heads/main/wings.sh" "Pterodactyl Wings Installer" ;;
+        3) run_remote_script "https://raw.githubusercontent.com/NotRayy01/hosting/refs/heads/main/ptroupdate.sh" "Pterodactyl Panel Updater" ;;
+        4) run_remote_script "https://raw.githubusercontent.com/NotRayy01/hosting/refs/heads/main/ptrouninstall" "Pterodactyl Uninstaller" ;;
+        5) run_remote_script "https://raw.githubusercontent.com/NotRayy01/hosting/refs/heads/main/ptro.sh" "Pterodactyl Manager Menu" ;;
+        6) run_remote_script "https://raw.githubusercontent.com/NotRayy01/hosting/refs/heads/main/blueprint.sh" "Blueprint Framework Installer" ;;
+        7) run_remote_script "https://raw.githubusercontent.com/NotRayy01/hosting/refs/heads/main/nebula.sh" "Nebula Theme Installer" ;;
+        8) run_remote_script "https://raw.githubusercontent.com/NotRayy01/hosting/refs/heads/main/vm.sh" "Cloud VM Manager" ;;
+        9) run_remote_script "https://raw.githubusercontent.com/NotRayy01/hosting/refs/heads/main/vmcreate.sh" "Cloud VM Creator" ;;
+        10) run_remote_script "https://raw.githubusercontent.com/NotRayy01/hosting/refs/heads/main/cloudflare.sh" "Cloudflared Installer" ;;
         0)
             show_banner
             echo -e "${GREEN}${BOLD}================================================================${NC}"
