@@ -125,13 +125,23 @@ while true; do
             fi
             cd /var/www/pterodactyl
             
-            wget -q https://github.com/mahimxyzz/Vps/raw/main/minecraftplayermanager.blueprint
-            wget -q https://github.com/mahimxyzz/Vps/raw/main/mcplugins.blueprint
-            wget -q https://github.com/mahimxyzz/Vps/raw/main/huxregister.blueprint
+            wget -q https://github.com/NotRayy01/hosting/raw/refs/heads/main/blueprintaddon/minecraftplayermanager.blueprint
+            wget -q https://github.com/NotRayy01/hosting/raw/refs/heads/main/blueprintaddon/mcplugins.blueprint
+            wget -q https://github.com/NotRayy01/hosting/raw/refs/heads/main/blueprintaddon/huxregister.blueprint
+            wget -q https://github.com/NotRayy01/hosting/raw/refs/heads/main/blueprintaddon/mclogs.blueprint
+            wget -q https://github.com/NotRayy01/hosting/raw/refs/heads/main/blueprintaddon/eggchanger.blueprint
+            wget -q https://github.com/NotRayy01/hosting/raw/refs/heads/main/blueprintaddon/serverbackgrounds.blueprint
+            wget -q https://github.com/NotRayy01/hosting/raw/refs/heads/main/blueprintaddon/simplefavicons.blueprint
+            wget -q https://github.com/NotRayy01/hosting/raw/refs/heads/main/blueprintaddon/simplefooters.blueprint
             
             blueprint -i mcplugins.blueprint && ok "MC Plugins installed"
             blueprint -i minecraftplayermanager.blueprint && ok "Player Manager installed"
             blueprint -i huxregister.blueprint && ok "Huxregister installed"
+            blueprint -i mclogs.blueprint && ok "MC Logs installed"
+            blueprint -i eggchanger.blueprint && ok "EGG Changer installed"
+            blueprint -i serverbackgrounds.blueprint && ok "Server Backgrounds installed"
+            blueprint -i simplefavicons.blueprint && ok "Simple Favicons installed"
+            blueprint -i simplefooters.blueprint && ok "Simple Footers installed"
             
             pause
             ;;
