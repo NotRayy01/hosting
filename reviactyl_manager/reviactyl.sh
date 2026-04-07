@@ -44,9 +44,28 @@ install_reviactyl() {
     show_banner
     echo -e "${MAGENTA}--- 🔮 Install Reviactyl Panel ---${NC}"
     
+    # Check for existing installation and prompt for wipe
     if [ -d "/var/www/reviactyl/public" ]; then
-        err "Reviactyl is already installed on this server!"
-        pause; return
+        warn "Reviactyl is already installed on this server!"
+        echo -e -n " ${CYAN}➤${NC} Do you want to WIPE the old files and reinstall fresh? (y/N): "
+        read -r CONFIRM
+        if [[ "$CONFIRM" =~ [Yy] ]]; then
+            warn "⚠️ THIS WILL PERMANENTLY DELETE ALL PANEL DATA, USERS, AND NODES!"
+            echo -e -n " ${CYAN}➤${NC} Are you absolutely sure? Type 'YES' to continue: "
+            read -r CONFIRM_WIPE
+            if [ "$CONFIRM_WIPE" == "YES" ]; then
+                step "Wiping old Reviactyl installation..."
+                rm -rf /var/www/reviactyl
+                mysql -u root -e "DROP DATABASE IF EXISTS panel;" || true
+                ok "Old files and database completely destroyed."
+            else
+                info "Installation aborted."
+                return
+            fi
+        else
+            info "Installation aborted."
+            return
+        fi
     fi
 
     # Auto Generate Secure Credentials
@@ -73,7 +92,7 @@ install_reviactyl() {
     fi
     ok "Dependencies installed!"
 
-    step "Configuring Database (Fixing localhost/127.0.0.1 mapping)..."
+    step "Configuring Database..."
     mysql -u root << EOF
 CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\`;
 CREATE USER IF NOT EXISTS '${DB_USER}'@'127.0.0.1' IDENTIFIED BY '${DB_PASS}';
@@ -97,7 +116,6 @@ EOF
     step "Configuring Environment & Composer..."
     cp .env.example .env
     
-    # Hardcode DB credentials to prevent connection denied errors
     sed -i "s/DB_HOST=.*/DB_HOST=127.0.0.1/" .env
     sed -i "s/DB_DATABASE=.*/DB_DATABASE=${DB_NAME}/" .env
     sed -i "s/DB_USERNAME=.*/DB_USERNAME=${DB_USER}/" .env
@@ -161,7 +179,6 @@ EOF
     echo -e " Password: ${DB_PASS}"
     echo ""
     info "Next step: Run Option 2 (Webserver Config) from the menu to secure your domain!"
-    pause
 }
 
 # ==============================================================================
@@ -172,7 +189,7 @@ config_webserver() {
     echo -e "${MAGENTA}--- 🌐 Configure Reviactyl Webserver ---${NC}"
     
     read -p "🔗 Enter your Reviactyl FQDN (e.g., panel.domain.com): " FQDN
-    if [ -z "$FQDN" ]; then err "Domain required!"; pause; return; fi
+    if [ -z "$FQDN" ]; then err "Domain required!"; return; fi
 
     echo -e -n " ${CYAN}➤${NC} Configure with SSL/HTTPS? (y/N): "
     read -r USE_SSL
@@ -201,7 +218,6 @@ config_webserver() {
     else
         ok "Webserver configured successfully for HTTP!"
     fi
-    pause
 }
 
 # ==============================================================================
@@ -213,7 +229,7 @@ update_reviactyl() {
     
     if [ ! -d "/var/www/reviactyl" ]; then
         err "Reviactyl does not appear to be installed at /var/www/reviactyl!"
-        pause; return
+        return
     fi
 
     echo "1) ⚡ Automatic Upgrade (Reviactyl v2.0.1+ Only)"
@@ -255,7 +271,6 @@ update_reviactyl() {
         0) return ;;
         *) err "Invalid option!"; sleep 2; return ;;
     esac
-    pause
 }
 
 # ==============================================================================
@@ -268,7 +283,7 @@ migrate_panel() {
     if [ ! -d "/var/www/pterodactyl" ]; then
         err "Pterodactyl installation not found at /var/www/pterodactyl!"
         info "You can only migrate an existing Pterodactyl panel."
-        pause; return
+        return
     fi
 
     warn "This will wipe your current Pterodactyl files and replace them with Reviactyl."
@@ -277,7 +292,7 @@ migrate_panel() {
     read -r CONFIRM
     if [[ ! "$CONFIRM" =~ [Yy] ]]; then
         info "Migration aborted."
-        pause; return
+        return
     fi
 
     step "Backing up .env and cleaning old files..."
@@ -309,7 +324,6 @@ migrate_panel() {
     echo ""
     ok "Migration to Reviactyl complete!"
     info "Since you migrated, your panel will still run from /var/www/pterodactyl to keep your webserver happy!"
-    pause
 }
 
 # ==============================================================================
@@ -329,11 +343,12 @@ while true; do
     read -p "Select Option [0-5]: " choice
 
     case "$choice" in
-        1) install_reviactyl ;;
-        2) config_webserver ;;
-        3) update_reviactyl ;;
-        4) migrate_panel ;;
-        5) bash <(curl -sL "https://raw.githubusercontent.com/NotRayy01/hosting/refs/heads/main/other/reviactyl_blueprint.sh") ;;
+        # Added the pause commands HERE so it waits before looping!
+        1) install_reviactyl; pause ;;
+        2) config_webserver; pause ;;
+        3) update_reviactyl; pause ;;
+        4) migrate_panel; pause ;;
+        5) bash <(curl -sL "https://raw.githubusercontent.com/NotRayy01/hosting/refs/heads/main/other/reviactyl_blueprint.sh"); pause ;;
         0) break ;;
         *) err "Invalid option!"; sleep 2 ;;
     esac
