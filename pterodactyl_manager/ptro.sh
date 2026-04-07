@@ -4,7 +4,6 @@
 # ==============================================================================
 # 👑 Developed by Ray
 # 🏢 Ray Industries | 📺 YouTube: @RayVerse
-# ⚡ Powered by Bash + Linux Automation
 # ==============================================================================
 
 set -e
@@ -160,7 +159,7 @@ while true; do
         4) run_ray_script "installers/phpmyadmin.sh" ;;
         5) install_blueprint ;;
         6) install_nebula ;;
-        7) run_ray_script "ui/addons.sh" ;;  <-- Now points to your new addons.sh menu!
+        7) run_ray_script "ui/addons.sh" ;;
         8) run_ray_script "ui/uninstall.sh" ;;
         0) break ;;
         *) err "Invalid option! Please enter a number between 0 and 8."; sleep 2 ;;
