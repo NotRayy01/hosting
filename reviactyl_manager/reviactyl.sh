@@ -1,25 +1,22 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# 🚀 Ray Reviactyl Manager (Pro Edition)
+# 🔮 Ray Reviactyl Manager (Pro Edition)
 # ==============================================================================
-# 👑 Developed by Ray
-# 🏢 Ray Industries | 📺 YouTube: @RayVerse
+# 👑 Developed by Ray | 🏢 Ray Industries
 # ==============================================================================
 
 set -e
 IFS=$'\n\t'
 
-# ==============================================================================
-# 🎨 UI & STYLING (Ray's Signature Style)
-# ==============================================================================
 RED="\033[0;31m"
 GREEN="\033[0;32m"
 YELLOW="\033[1;33m"
-BLUE="\033[0;34m"
-MAGENTA="\033[0;35m"
 CYAN="\033[0;36m"
-NC="\033[0m" # No Color
+MAGENTA="\033[0;35m"
+NC="\033[0m"
 BOLD="\033[1m"
+
+RAY_REPO="https://raw.githubusercontent.com/NotRayy01/hosting/refs/heads/main"
 
 ok() { echo -e "${GREEN}✅ $1${NC}"; }
 info() { echo -e "${CYAN}ℹ️  $1${NC}"; }
@@ -34,272 +31,300 @@ pause() {
 
 show_banner() {
     clear
-    echo -e "${CYAN}${BOLD}"
-    echo "================================================================"
-    echo " 🚀 Ray Reviactyl Control Center "
-    echo " 👑 Developed by Ray | 🏢 Ray Industries | 📺 @RayVerse"
-    echo "================================================================${NC}"
+    echo -e "${CYAN}${BOLD}================================================================${NC}"
+    echo -e "${CYAN}${BOLD} 🔮 Ray Reviactyl Manager "
+    echo -e "${CYAN}${BOLD}================================================================${NC}"
     echo ""
 }
 
 # ==============================================================================
-# 🛡️ INIT & CHECKS
-# ==============================================================================
-if [ "$EUID" -ne 0 ]; then
-    echo -e "${RED}${BOLD}❌ This script must be run as root! Try running with 'sudo'.${NC}"
-    exit 1
-fi
-
-REV_DIR="/var/www/reviactyl"
-# Reviactyl requires PHP 8.1 to resolve composer dependencies cleanly
-PHP_VERSION="8.1"
-
-# ==============================================================================
-# 📦 MODULE 1: INSTALL REVIACTYL
+# 1️⃣ INSTALL REVIACTYL
 # ==============================================================================
 install_reviactyl() {
     show_banner
-    echo -e "${MAGENTA}--- 📦 Install Reviactyl Panel ---${NC}"
+    echo -e "${MAGENTA}--- 🔮 Install Reviactyl Panel ---${NC}"
     
-    read -p "🌐 Enter your domain (e.g., rev.example.com): " DOMAIN
-    if [[ -z "$DOMAIN" ]]; then err "Domain is required!"; pause; return; fi
-    
+    if [ -d "/var/www/reviactyl/public" ]; then
+        err "Reviactyl is already installed on this server!"
+        pause; return
+    fi
+
     # Auto Generate Secure Credentials
     DB_PASS=$(tr -dc A-Za-z0-9 </dev/urandom | head -c 20 ; echo '')
     DB_NAME="reviactyl"
-    DB_USER="reviactyl_user"
+    DB_USER="reviactyl"
 
-    step "Updating system & installing core dependencies..."
-    apt-get update -qq && apt-get upgrade -y -qq
-    apt-get install -y curl apt-transport-https ca-certificates gnupg lsb-release unzip git tar sudo software-properties-common -qq
-
-    OS=$(lsb_release -is | tr '[:upper:]' '[:lower:]')
-    CODENAME=$(lsb_release -cs)
-
-    # PHP Repository
-    if [[ "$OS" == "ubuntu" ]]; then
-        LC_ALL=C.UTF-8 add-apt-repository -y ppa:ondrej/php >/dev/null 2>&1 || true
-    elif [[ "$OS" == "debian" ]]; then
-        curl -fsSL https://packages.sury.org/php/apt.gpg | gpg --dearmor -o /usr/share/keyrings/sury-php.gpg --yes
-        echo "deb [signed-by=/usr/share/keyrings/sury-php.gpg] https://packages.sury.org/php/ $CODENAME main" > /etc/apt/sources.list.d/sury-php.list
-    fi
-
-    # Redis Repository
-    curl -fsSL https://packages.redis.io/gpg | gpg --dearmor -o /usr/share/keyrings/redis-archive-keyring.gpg --yes
-    echo "deb [signed-by=/usr/share/keyrings/redis-archive-keyring.gpg] https://packages.redis.io/deb $CODENAME main" > /etc/apt/sources.list.d/redis.list
-    apt-get update -qq
-
-    step "Installing PHP $PHP_VERSION, Nginx, MariaDB, Redis & tools..."
-    apt-get install -y php${PHP_VERSION} php${PHP_VERSION}-{cli,fpm,common,mysql,mbstring,bcmath,xml,zip,curl,gd,tokenizer,ctype,simplexml,dom} mariadb-server nginx redis cron -qq
+    step "Updating system & installing core repositories..."
+    apt-get update -qq && apt-get install -y software-properties-common curl apt-transport-https ca-certificates gnupg lsb-release -qq
     
-    # Force system to use PHP 8.1 in case 8.3 was previously installed
-    update-alternatives --set php /usr/bin/php${PHP_VERSION} >/dev/null 2>&1 || true
+    LC_ALL=C.UTF-8 add-apt-repository -y ppa:ondrej/php >/dev/null 2>&1 || true
+    
+    curl -fsSL https://packages.redis.io/gpg | gpg --dearmor -o /usr/share/keyrings/redis-archive-keyring.gpg --yes
+    echo "deb [signed-by=/usr/share/keyrings/redis-archive-keyring.gpg] https://packages.redis.io/deb $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/redis.list >/dev/null
 
+    apt-get update -qq
+    ok "Repositories added!"
+
+    step "Installing PHP 8.3, MariaDB, Nginx, Redis & Dependencies..."
+    apt-get install -y php8.3 php8.3-{common,cli,gd,mysql,mbstring,bcmath,xml,fpm,curl,zip,intl} mariadb-server nginx tar unzip git redis-server -qq
+    
     if ! command -v composer >/dev/null 2>&1; then
         curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
     fi
-    ok "Core packages installed."
+    ok "Dependencies installed!"
 
-    step "Creating Reviactyl database & user..."
+    step "Configuring Database..."
     mysql -u root << EOF
 CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\`;
 CREATE USER IF NOT EXISTS '${DB_USER}'@'127.0.0.1' IDENTIFIED BY '${DB_PASS}';
 GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'127.0.0.1' WITH GRANT OPTION;
 FLUSH PRIVILEGES;
 EOF
-    ok "Database configured securely!"
+    ok "Database 'reviactyl' configured securely!"
 
     step "Downloading Reviactyl Panel..."
-    rm -rf "$REV_DIR"
-    git clone https://github.com/reviactyl/reviactyl.git "$REV_DIR" -q
-    cd "$REV_DIR"
-    chmod -R 755 storage/* bootstrap/cache/
-    ok "Reviactyl downloaded!"
-
-    step "Configuring Environment..."
-    cp .env.example .env
+    mkdir -p /var/www/reviactyl
+    cd /var/www/reviactyl
     
+    curl -sLo panel.tar.gz https://github.com/reviactyl/panel/releases/latest/download/panel.tar.gz
+    tar -xzvf panel.tar.gz >/dev/null 2>&1
+    chmod -R 755 storage/* bootstrap/cache/
+    rm -f panel.tar.gz
+    ok "Reviactyl downloaded and extracted!"
+
+    step "Configuring Environment & Composer..."
+    cp .env.example .env
     export COMPOSER_ALLOW_SUPERUSER=1
-    # Adding ignore-platform-reqs forces composer to ignore strict PHP mismatches
-    composer install --no-dev --optimize-autoloader --quiet --ignore-platform-reqs || composer update --no-dev --optimize-autoloader --quiet --ignore-platform-reqs
-
+    composer install --no-dev --optimize-autoloader --quiet
     php artisan key:generate --force
+    ok "Environment prepped!"
 
-    sed -i \
-        -e "s|APP_URL=.*|APP_URL=https://${DOMAIN}|g" \
-        -e "s|DB_HOST=.*|DB_HOST=127.0.0.1|g" \
-        -e "s|DB_PORT=.*|DB_PORT=3306|g" \
-        -e "s|DB_DATABASE=.*|DB_DATABASE=${DB_NAME}|g" \
-        -e "s|DB_USERNAME=.*|DB_USERNAME=${DB_USER}|g" \
-        -e "s|DB_PASSWORD=.*|DB_PASSWORD=${DB_PASS}|g" \
-        -e "s|APP_ENV=.*|APP_ENV=production|g" \
-        -e "s|APP_DEBUG=.*|APP_DEBUG=false|g" \
-        .env
-
-    step "Running Migrations & Seeding..."
+    step "Initial Panel Setup (Interactive)..."
+    echo -e "${YELLOW}Please answer the following prompts to configure your panel:${NC}"
+    php artisan p:environment:setup
+    
+    php artisan p:environment:database --host="127.0.0.1" --port="3306" --database="${DB_NAME}" --username="${DB_USER}" --password="${DB_PASS}"
+    
+    php artisan p:environment:mail
+    
+    step "Running Database Migrations..."
     php artisan migrate --seed --force
 
-    step "Setting Permissions & Cron Jobs..."
-    chown -R www-data:www-data "$REV_DIR"
-    systemctl enable --now cron
-    (crontab -l 2>/dev/null | grep -v "$REV_DIR/artisan schedule:run"; echo "* * * * * php $REV_DIR/artisan schedule:run >> /dev/null 2>&1") | crontab -
+    step "Creating Admin User..."
+    php artisan p:user:make
 
-    step "Generating self-signed SSL & Configuring Nginx..."
-    mkdir -p /etc/ssl/reviactyl
-    openssl req -x509 -nodes -days 3650 -newkey rsa:4096 \
-        -keyout /etc/ssl/reviactyl/privkey.pem \
-        -out /etc/ssl/reviactyl/fullchain.pem \
-        -subj "/CN=${DOMAIN}" > /dev/null 2>&1
+    step "Setting Permissions & Services..."
+    chown -R www-data:www-data /var/www/reviactyl/*
+    
+    (crontab -l 2>/dev/null | grep -v "/var/www/reviactyl/artisan schedule:run"; echo "* * * * * php /var/www/reviactyl/artisan schedule:run >> /dev/null 2>&1") | crontab -
 
-    cat > /etc/nginx/sites-available/reviactyl.conf << EOF
-server {
-    listen 80;
-    server_name ${DOMAIN};
-    return 301 https://\$server_name\$request_uri;
-}
-server {
-    listen 443 ssl http2;
-    server_name ${DOMAIN};
-    root ${REV_DIR}/public;
-    index index.php;
-    ssl_certificate /etc/ssl/reviactyl/fullchain.pem;
-    ssl_certificate_key /etc/ssl/reviactyl/privkey.pem;
-    client_max_body_size 100M;
-    client_body_timeout 120s;
-    location / {
-        try_files \$uri \$uri/ /index.php?\$query_string;
-    }
-    location ~ \.php$ {
-        fastcgi_split_path_info ^(.+\.php)(/.+)\$;
-        fastcgi_pass unix:/run/php/php${PHP_VERSION}-fpm.sock;
-        fastcgi_index index.php;
-        include fastcgi_params;
-        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
-        fastcgi_param PHP_VALUE "upload_max_filesize=100M \n post_max_size=100M";
-    }
-    location ~ /\.ht { deny all; }
-}
-EOF
-    ln -sf /etc/nginx/sites-available/reviactyl.conf /etc/nginx/sites-enabled/
-    rm -f /etc/nginx/sites-enabled/default
-    systemctl restart nginx
-
-    step "Deploying Reviactyl Queue Worker..."
-    cat > /etc/systemd/system/reviactylq.service << EOF
+    cat > /etc/systemd/system/reviq.service << EOF
 [Unit]
 Description=Reviactyl Queue Worker
 After=redis-server.service
+
 [Service]
 User=www-data
 Group=www-data
 Restart=always
-RestartSec=5
-ExecStart=/usr/bin/php ${REV_DIR}/artisan queue:work --sleep=3 --tries=3
+ExecStart=/usr/bin/php /var/www/reviactyl/artisan queue:work --queue=high,standard,low --sleep=3 --tries=3
+StartLimitInterval=180
+StartLimitBurst=30
+RestartSec=5s
+
 [Install]
 WantedBy=multi-user.target
 EOF
-    systemctl daemon-reload
-    systemctl enable --now reviactylq.service
 
-    step "Create your Admin Account:"
-    cd "$REV_DIR"
-    php artisan p:user:make
+    systemctl daemon-reload
+    systemctl enable --now redis-server >/dev/null 2>&1
+    systemctl enable --now reviq.service >/dev/null 2>&1
+    ok "Services started and enabled!"
 
     echo ""
     echo -e "${GREEN}${BOLD}================================================================${NC}"
     echo -e "${GREEN}${BOLD}              ✨ REVIACTYL INSTALLATION COMPLETE ✨             ${NC}"
     echo -e "${GREEN}${BOLD}================================================================${NC}"
     echo ""
-    echo -e "${CYAN}${BOLD} 🌐 Panel URL:${NC} https://${DOMAIN}"
-    echo -e "${CYAN}${BOLD} 📁 Panel Path:${NC} $REV_DIR"
+    echo -e "${YELLOW}${BOLD}🔐 Database Credentials (Saved to .env automatically)${NC}"
+    echo -e " Database: ${DB_NAME}"
+    echo -e " Username: ${DB_USER}"
+    echo -e " Password: ${DB_PASS}"
     echo ""
-    echo -e "${YELLOW}${BOLD}🔐 Secure Database Credentials (SAVE THESE!)${NC}"
-    echo -e "${BOLD} Database:${NC} ${DB_NAME}"
-    echo -e "${BOLD} Username:${NC} ${DB_USER}"
-    echo -e "${BOLD} Password:${NC} ${DB_PASS}"
-    echo ""
-    warn "For production: Replace self-signed cert with Let's Encrypt (certbot)"
-    info "Tip: sudo apt install certbot python3-certbot-nginx && sudo certbot --nginx -d ${DOMAIN}"
+    info "Next step: Run Option 2 (Webserver Config) from the menu to secure your domain!"
     pause
 }
 
 # ==============================================================================
-# 🔄 MODULE 2: UPDATE REVIACTYL
+# 2️⃣ WEBSERVER CONFIG
+# ==============================================================================
+config_webserver() {
+    show_banner
+    echo -e "${MAGENTA}--- 🌐 Configure Reviactyl Webserver ---${NC}"
+    
+    read -p "🔗 Enter your Reviactyl FQDN (e.g., panel.domain.com): " FQDN
+    if [ -z "$FQDN" ]; then err "Domain required!"; pause; return; fi
+
+    echo -e -n " ${CYAN}➤${NC} Configure with SSL/HTTPS? (y/N): "
+    read -r USE_SSL
+
+    step "Fetching Nginx Config from Ray Repository..."
+    if [[ "$USE_SSL" =~ [Yy] ]]; then
+        curl -sL "$RAY_REPO/pterodactyl_manager/configs/nginx_ssl.conf" -o /etc/nginx/sites-available/reviactyl.conf
+    else
+        curl -sL "$RAY_REPO/pterodactyl_manager/configs/nginx.conf" -o /etc/nginx/sites-available/reviactyl.conf
+    fi
+
+    sed -i -e "s@<domain>@${FQDN}@g" /etc/nginx/sites-available/reviactyl.conf
+    sed -i -e "s@<php_socket>@/run/php/php8.3-fpm.sock@g" /etc/nginx/sites-available/reviactyl.conf
+    sed -i -e "s@/var/www/pterodactyl/public@/var/www/reviactyl/public@g" /etc/nginx/sites-available/reviactyl.conf
+    sed -i -e "s@/var/log/nginx/pterodactyl.app-error.log@/var/log/nginx/reviactyl.app-error.log@g" /etc/nginx/sites-available/reviactyl.conf
+
+    step "Enabling Configuration..."
+    ln -sf /etc/nginx/sites-available/reviactyl.conf /etc/nginx/sites-enabled/reviactyl.conf
+    rm -f /etc/nginx/sites-enabled/default
+
+    systemctl restart nginx
+    
+    if [[ "$USE_SSL" =~ [Yy] ]]; then
+        info "Nginx is configured! Ensure you generate your SSL using certbot:"
+        info "sudo certbot --nginx -d $FQDN"
+    else
+        ok "Webserver configured successfully for HTTP!"
+    fi
+    pause
+}
+
+# ==============================================================================
+# 3️⃣ UPDATE PANEL
 # ==============================================================================
 update_reviactyl() {
     show_banner
     echo -e "${MAGENTA}--- 🔄 Update Reviactyl Panel ---${NC}"
     
-    if [ ! -d "$REV_DIR" ]; then
-        err "Reviactyl directory not found at $REV_DIR"
+    if [ ! -d "/var/www/reviactyl" ]; then
+        err "Reviactyl does not appear to be installed at /var/www/reviactyl!"
         pause; return
     fi
 
-    step "Navigating to panel directory..."
-    cd "$REV_DIR"
-
-    step "Enabling maintenance mode..."
-    php artisan down >/dev/null 2>&1 || true
-
-    step "Pulling latest Reviactyl files from GitHub..."
-    git pull origin main -q
-
-    step "Setting storage permissions..."
-    chmod -R 755 storage/* bootstrap/cache >/dev/null 2>&1
-
-    step "Updating Composer dependencies..."
-    export COMPOSER_ALLOW_SUPERUSER=1
-    composer install --no-dev --optimize-autoloader --quiet --ignore-platform-reqs || composer update --no-dev --optimize-autoloader --quiet --ignore-platform-reqs
-
-    step "Clearing cached views and config..."
-    php artisan view:clear >/dev/null 2>&1
-    php artisan config:clear >/dev/null 2>&1
-
-    step "Running database migrations..."
-    php artisan migrate --seed --force >/dev/null 2>&1
-
-    step "Correcting file ownership..."
-    chown -R www-data:www-data "$REV_DIR" >/dev/null 2>&1
-
-    step "Restarting queue workers..."
-    systemctl restart reviactylq.service >/dev/null 2>&1 || php artisan queue:restart >/dev/null 2>&1
-
-    step "Disabling maintenance mode..."
-    php artisan up >/dev/null 2>&1
-
+    echo "1) ⚡ Automatic Upgrade (Reviactyl v2.0.1+ Only)"
+    echo "2) 🛠️  Manual Upgrade (For older versions or if Auto fails)"
+    echo "0) 🔙 Cancel Update"
     echo ""
-    echo -e "${GREEN}${BOLD}================================================================${NC}"
-    echo -e "${GREEN}${BOLD}              ✨ REVIACTYL UPDATE COMPLETE ✨                   ${NC}"
-    echo -e "${GREEN}${BOLD}================================================================${NC}"
-    echo ""
-    info "Your Reviactyl Panel is now running the latest version!"
+    read -p "Select Update Method [0-2]: " update_choice
+
+    cd /var/www/reviactyl
+
+    case "$update_choice" in
+        1)
+            step "Running Automatic Upgrade..."
+            php artisan p:upgrade
+            ok "Automatic Upgrade process finished!"
+            ;;
+        2)
+            step "Downloading latest Reviactyl release..."
+            curl -sLo panel.tar.gz https://github.com/reviactyl/panel/releases/latest/download/panel.tar.gz
+            
+            step "Extracting files..."
+            tar -xzvf panel.tar.gz >/dev/null 2>&1
+            chmod -R 755 storage/* bootstrap/cache/
+            rm -f panel.tar.gz
+
+            step "Updating Composer Dependencies..."
+            export COMPOSER_ALLOW_SUPERUSER=1
+            composer install --no-dev --optimize-autoloader --quiet
+
+            step "Running Database Migrations..."
+            php artisan migrate --seed --force
+
+            step "Setting Permissions & Restarting Queue..."
+            chown -R www-data:www-data /var/www/reviactyl/*
+            systemctl restart reviq.service
+            
+            ok "Manual Upgrade complete!"
+            ;;
+        0) return ;;
+        *) err "Invalid option!"; sleep 2; return ;;
+    esac
     pause
 }
 
 # ==============================================================================
-# 📋 MAIN MENU LOOP
+# 4️⃣ MIGRATE FROM PTERODACTYL
+# ==============================================================================
+migrate_panel() {
+    show_banner
+    echo -e "${MAGENTA}--- 🚚 Migrate from Pterodactyl to Reviactyl ---${NC}"
+    
+    if [ ! -d "/var/www/pterodactyl" ]; then
+        err "Pterodactyl installation not found at /var/www/pterodactyl!"
+        info "You can only migrate an existing Pterodactyl panel."
+        pause; return
+    fi
+
+    warn "This will wipe your current Pterodactyl files and replace them with Reviactyl."
+    warn "Your database and .env configuration will be preserved."
+    echo -e -n " ${CYAN}➤${NC} Are you sure you want to proceed? (y/N): "
+    read -r CONFIRM
+    if [[ ! "$CONFIRM" =~ [Yy] ]]; then
+        info "Migration aborted."
+        pause; return
+    fi
+
+    step "Backing up .env and cleaning old files..."
+    cd /var/www/pterodactyl
+    cp .env /tmp/pterodactyl_env_backup
+    
+    # Safely remove all files and folders except the .env file
+    find . -mindepth 1 -maxdepth 1 ! -name '.env' -exec rm -rf {} +
+    ok "Old files removed safely!"
+
+    step "Downloading Reviactyl Panel..."
+    curl -sLo panel.tar.gz https://github.com/reviactyl/panel/releases/latest/download/panel.tar.gz
+    
+    step "Extracting files..."
+    tar -xzvf panel.tar.gz >/dev/null 2>&1
+    chmod -R 755 storage/* bootstrap/cache/
+    rm -f panel.tar.gz
+
+    step "Installing Composer Dependencies..."
+    export COMPOSER_ALLOW_SUPERUSER=1
+    composer install --no-dev --optimize-autoloader --quiet
+
+    step "Running Database Migrations..."
+    php artisan migrate --seed --force
+
+    step "Setting Permissions & Restarting Queue..."
+    chown -R www-data:www-data /var/www/pterodactyl/*
+    systemctl restart pteroq.service >/dev/null 2>&1 || true
+    
+    echo ""
+    ok "Migration to Reviactyl complete!"
+    info "Since you migrated, your panel will still run from /var/www/pterodactyl to keep your webserver happy!"
+    pause
+}
+
+# ==============================================================================
+# 📋 REVIACTYL MENU
 # ==============================================================================
 while true; do
     show_banner
-    echo -e "${YELLOW}🎛️  Reviactyl Manager Menu${NC}"
-    echo "1) 📦 Install Reviactyl Panel"
-    echo "2) 🔄 Update Reviactyl Panel"
-    echo "0) ❌ Exit"
+    echo "1) 🔮 Install Reviactyl Panel (Fresh Install)"
+    echo "2) 🌐 Configure Webserver (Nginx)"
+    echo "3) 🔄 Update Panel"
+    echo "4) 🚚 Migrate from Pterodactyl to Reviactyl"
+    echo ""
+    echo "0) 🔙 Return to Master Control Center"
     echo ""
     
-    read -p "Select Option [0-2]: " choice
+    read -p "Select Option [0-4]: " choice
 
     case "$choice" in
         1) install_reviactyl ;;
-        2) update_reviactyl ;;
-        0)
-            show_banner
-            ok "Exiting Reviactyl Manager."
-            exit 0
-            ;;
-        *)
-            err "Invalid option! Please enter 0, 1, or 2."
-            sleep 2
-            ;;
+        2) config_webserver ;;
+        3) update_reviactyl ;;
+        4) migrate_panel ;;
+        0) break ;;
+        *) err "Invalid option!"; sleep 2 ;;
     esac
 done
