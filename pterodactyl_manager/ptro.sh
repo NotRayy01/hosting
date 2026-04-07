@@ -60,20 +60,7 @@ install_both() {
 # 🏗️ BLUEPRINT FRAMEWORK (Fixed physical download)
 # ==============================================================================
 install_blueprint() {
-    show_banner
-    echo -e "${MAGENTA}--- 🏗️ Install Blueprint Framework ---${NC}"
-    if [ ! -d "$PTRO_DIR" ]; then err "Pterodactyl Panel is not installed!"; pause; return; fi
-
-    step "Installing Blueprint..."
-    cd "$PTRO_DIR"
-    
-    # Download physically to avoid /dev/fd memory crashes
-    curl -sL https://raw.githubusercontent.com/teamblueprint/main/main/blueprint.sh -o install_bp.sh
-    bash install_bp.sh
-    rm -f install_bp.sh
-    
-    ok "Blueprint Framework Installed!"
-    pause
+    run_ray_script "other/blueprint.sh"
 }
 
 # ==============================================================================
