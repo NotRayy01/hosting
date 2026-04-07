@@ -60,7 +60,8 @@ install_both() {
 # 🏗️ BLUEPRINT FRAMEWORK (Fixed physical download)
 # ==============================================================================
 install_blueprint() {
-    run_ray_script "other/blueprint.sh"
+    # Directly targeting the root "other" folder
+    bash <(curl -sL "https://raw.githubusercontent.com/NotRayy01/hosting/refs/heads/main/other/blueprint.sh")
 }
 
 # ==============================================================================
