@@ -51,7 +51,7 @@ install_reviactyl() {
 
     # Auto Generate Secure Credentials
     DB_PASS=$(tr -dc A-Za-z0-9 </dev/urandom | head -c 20 ; echo '')
-    DB_NAME="reviactyl"
+    DB_NAME="panel"
     DB_USER="reviactyl"
 
     step "Updating system & installing core repositories..."
@@ -73,14 +73,16 @@ install_reviactyl() {
     fi
     ok "Dependencies installed!"
 
-    step "Configuring Database..."
+    step "Configuring Database (Fixing localhost/127.0.0.1 mapping)..."
     mysql -u root << EOF
 CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\`;
 CREATE USER IF NOT EXISTS '${DB_USER}'@'127.0.0.1' IDENTIFIED BY '${DB_PASS}';
 GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'127.0.0.1' WITH GRANT OPTION;
+CREATE USER IF NOT EXISTS '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';
+GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'localhost' WITH GRANT OPTION;
 FLUSH PRIVILEGES;
 EOF
-    ok "Database 'reviactyl' configured securely!"
+    ok "Database configured securely!"
 
     step "Downloading Reviactyl Panel..."
     mkdir -p /var/www/reviactyl
@@ -94,6 +96,13 @@ EOF
 
     step "Configuring Environment & Composer..."
     cp .env.example .env
+    
+    # Hardcode DB credentials to prevent connection denied errors
+    sed -i "s/DB_HOST=.*/DB_HOST=127.0.0.1/" .env
+    sed -i "s/DB_DATABASE=.*/DB_DATABASE=${DB_NAME}/" .env
+    sed -i "s/DB_USERNAME=.*/DB_USERNAME=${DB_USER}/" .env
+    sed -i "s/DB_PASSWORD=.*/DB_PASSWORD=${DB_PASS}/" .env
+
     export COMPOSER_ALLOW_SUPERUSER=1
     composer install --no-dev --optimize-autoloader --quiet
     php artisan key:generate --force
@@ -275,7 +284,6 @@ migrate_panel() {
     cd /var/www/pterodactyl
     cp .env /tmp/pterodactyl_env_backup
     
-    # Safely remove all files and folders except the .env file
     find . -mindepth 1 -maxdepth 1 ! -name '.env' -exec rm -rf {} +
     ok "Old files removed safely!"
 
@@ -313,17 +321,19 @@ while true; do
     echo "2) 🌐 Configure Webserver (Nginx)"
     echo "3) 🔄 Update Panel"
     echo "4) 🚚 Migrate from Pterodactyl to Reviactyl"
+    echo "5) 🏗️  Install Blueprint Framework (Reviactyl Edition)"
     echo ""
     echo "0) 🔙 Return to Master Control Center"
     echo ""
     
-    read -p "Select Option [0-4]: " choice
+    read -p "Select Option [0-5]: " choice
 
     case "$choice" in
         1) install_reviactyl ;;
         2) config_webserver ;;
         3) update_reviactyl ;;
         4) migrate_panel ;;
+        5) bash <(curl -sL "https://raw.githubusercontent.com/NotRayy01/hosting/refs/heads/main/other/reviactyl_blueprint.sh") ;;
         0) break ;;
         *) err "Invalid option!"; sleep 2 ;;
     esac
