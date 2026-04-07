@@ -56,6 +56,9 @@ install_both() {
     run_ray_script "ui/wings.sh"
 }
 
+# ==============================================================================
+# 🏗️ BLUEPRINT FRAMEWORK (Fixed physical download)
+# ==============================================================================
 install_blueprint() {
     show_banner
     echo -e "${MAGENTA}--- 🏗️ Install Blueprint Framework ---${NC}"
@@ -63,13 +66,18 @@ install_blueprint() {
 
     step "Installing Blueprint..."
     cd "$PTRO_DIR"
-    bash <(curl -s https://raw.githubusercontent.com/teamblueprint/main/main/blueprint.sh)
+    
+    # Download physically to avoid /dev/fd memory crashes
+    curl -sL https://raw.githubusercontent.com/teamblueprint/main/main/blueprint.sh -o install_bp.sh
+    bash install_bp.sh
+    rm -f install_bp.sh
+    
     ok "Blueprint Framework Installed!"
     pause
 }
 
 # ==============================================================================
-# 🌌 NEBULA THEME (Auto-Fetch from Addons Folder)
+# 🌌 NEBULA THEME
 # ==============================================================================
 install_nebula() {
     show_banner
@@ -96,7 +104,11 @@ install_nebula() {
         ok "Blueprint tool detected!"
     else
         warn "Blueprint tool not found. Installing now..."
-        curl -sSL https://blueprint.zip/install.sh | bash
+        # Download physically to avoid /dev/fd memory crashes
+        curl -sL https://raw.githubusercontent.com/teamblueprint/main/main/blueprint.sh -o install_bp.sh
+        bash install_bp.sh
+        rm -f install_bp.sh
+        
         if command -v blueprint >/dev/null 2>&1; then
             ok "Blueprint installed successfully!"
         else
