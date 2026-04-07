@@ -54,13 +54,13 @@ install_both() {
     echo -e "\n${CYAN}➤ Panel installation complete. Proceeding to Wings...${NC}"
     sleep 3
     run_ray_script "ui/wings.sh"
+    pause # Holds the screen so you can read the Wings logs
 }
 
 # ==============================================================================
-# 🏗️ BLUEPRINT FRAMEWORK (Fixed physical download)
+# 🏗️ BLUEPRINT FRAMEWORK (Points to the new sub-menu)
 # ==============================================================================
 install_blueprint() {
-    # Directly targeting the root "other" folder
     bash <(curl -sL "https://raw.githubusercontent.com/NotRayy01/hosting/refs/heads/main/other/blueprint.sh")
 }
 
@@ -92,7 +92,6 @@ install_nebula() {
         ok "Blueprint tool detected!"
     else
         warn "Blueprint tool not found. Installing now..."
-        # Download physically to avoid /dev/fd memory crashes
         curl -sL https://raw.githubusercontent.com/teamblueprint/main/main/blueprint.sh -o install_bp.sh
         bash install_bp.sh
         rm -f install_bp.sh
@@ -153,14 +152,15 @@ while true; do
     read -p "Select Option [0-8]: " choice
 
     case "$choice" in
-        1) run_ray_script "ui/panel.sh" ;;
-        2) run_ray_script "ui/wings.sh" ;;
-        3) install_both ;;
-        4) run_ray_script "installers/phpmyadmin.sh" ;;
-        5) install_blueprint ;;
-        6) install_nebula ;;
-        7) run_ray_script "ui/addons.sh" ;;
-        8) run_ray_script "ui/uninstall.sh" ;;
+        # Added '; pause' so it waits for you to read the logs before clearing!
+        1) run_ray_script "ui/panel.sh"; pause ;;
+        2) run_ray_script "ui/wings.sh"; pause ;;
+        3) install_both ;; 
+        4) run_ray_script "installers/phpmyadmin.sh"; pause ;;
+        5) install_blueprint ;; 
+        6) install_nebula ;; 
+        7) run_ray_script "ui/addons.sh" ;; 
+        8) run_ray_script "ui/uninstall.sh"; pause ;;
         0) break ;;
         *) err "Invalid option! Please enter a number between 0 and 8."; sleep 2 ;;
     esac
