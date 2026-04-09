@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# 🔮 Ray Reviactyl Blueprint Manager (Pro Edition)
+# 🔮 Ray Reviactyl Blueprint Manager
 # ==============================================================================
 # 👑 Developed by Ray | 🏢 Ray Industries
 # ==============================================================================
@@ -65,16 +65,17 @@ install_blueprint() {
     apt-get update -qq && apt-get install -y curl wget unzip ca-certificates git gnupg zip -qq
     ok "Dependencies installed."
 
-    step "Downloading Latest Reviactyl Blueprint..."
+    step "Downloading Latest Reviactyl Blueprint (Bypassing API limits)..."
     cd "$REV_DIR"
-    LATEST_URL=$(curl -s https://api.github.com/repos/reviactyl/blueprint/releases/latest | grep 'browser_download_url' | grep 'release.zip' | cut -d '"' -f 4)
     
-    if [ -z "$LATEST_URL" ]; then
-        err "Failed to fetch download URL from GitHub API. Rate limited?"
+    # Direct download route! Zero API limits.
+    wget -q "https://github.com/reviactyl/blueprint/releases/latest/download/release.zip" -O release.zip
+    
+    if [ ! -s release.zip ]; then
+        err "Failed to download release.zip!"
         pause; return
     fi
     
-    wget -q "$LATEST_URL" -O release.zip
     unzip -oq release.zip
     rm -f release.zip
     ok "Reviactyl Blueprint extracted successfully."
