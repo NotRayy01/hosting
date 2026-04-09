@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# 🔮 Ray Reviactyl Manager 
+# 🔮 Ray Reviactyl Manager
 # ==============================================================================
 # 👑 Developed by Ray | 🏢 Ray Industries
 # ==============================================================================
@@ -74,22 +74,32 @@ install_reviactyl() {
     DB_USER="reviactyl"
 
     step "Updating system & installing core repositories..."
-    apt-get update -qq && apt-get install -y software-properties-common curl apt-transport-https ca-certificates gnupg lsb-release -qq
+    apt-get update -qq && apt-get install -y software-properties-common curl apt-transport-https ca-certificates gnupg lsb-release wget -qq
     
-    # OS-Aware PPA Injection
+    # OS-Aware PHP Repository Injection
+    OS_ID=$(lsb_release -is | tr '[:upper:]' '[:lower:]')
     OS_CODENAME=$(lsb_release -cs)
-    if [[ "$OS_CODENAME" == "focal" || "$OS_CODENAME" == "jammy" ]]; then
-        info "Older Ubuntu version detected. Injecting ondrej/php PPA..."
-        LC_ALL=C.UTF-8 add-apt-repository -y ppa:ondrej/php >/dev/null 2>&1 || true
+    
+    if [ "$OS_ID" == "debian" ]; then
+        info "Debian detected ($OS_CODENAME). Injecting sury/php repository..."
+        wget -qO /etc/apt/trusted.gpg.d/php.gpg https://packages.sury.org/php/apt.gpg
+        echo "deb https://packages.sury.org/php/ $(lsb_release -sc) main" | tee /etc/apt/sources.list.d/sury-php.list > /dev/null
+    elif [ "$OS_ID" == "ubuntu" ]; then
+        if [[ "$OS_CODENAME" == "focal" || "$OS_CODENAME" == "jammy" ]]; then
+            info "Ubuntu $OS_CODENAME detected. Injecting ondrej/php PPA..."
+            LC_ALL=C.UTF-8 add-apt-repository -y ppa:ondrej/php >/dev/null 2>&1 || true
+        else
+            info "Modern Ubuntu detected ($OS_CODENAME). Skipping legacy PHP PPA."
+        fi
     else
-        info "Modern Ubuntu version detected ($OS_CODENAME). Skipping legacy PHP PPA."
+        info "Unknown OS detected ($OS_ID). Attempting default repositories."
     fi
     
     curl -fsSL https://packages.redis.io/gpg | gpg --dearmor -o /usr/share/keyrings/redis-archive-keyring.gpg --yes
     echo "deb [signed-by=/usr/share/keyrings/redis-archive-keyring.gpg] https://packages.redis.io/deb $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/redis.list >/dev/null
 
     apt-get update -qq
-    ok "Repositories added!"
+    ok "Repositories configured!"
 
     step "Installing PHP 8.3, MariaDB, Nginx, Redis & Dependencies..."
     apt-get install -y php8.3 php8.3-{common,cli,gd,mysql,mbstring,bcmath,xml,fpm,curl,zip,intl} mariadb-server nginx tar unzip git redis-server -qq
