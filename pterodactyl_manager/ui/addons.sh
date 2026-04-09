@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# 🧩 Ray Blueprint Addon Manager (Pro Edition - Auto Detect)
+# 🧩 Ray Blueprint Addon Manager
 # ==============================================================================
 # 👑 Developed by Ray | 🏢 Ray Industries
 # ==============================================================================
@@ -17,8 +17,6 @@ NC="\033[0m"
 BOLD="\033[1m"
 
 RAY_REPO="https://raw.githubusercontent.com/NotRayy01/hosting/refs/heads/main/pterodactyl_manager"
-API_URL="https://api.github.com/repos/NotRayy01/hosting/contents/pterodactyl_manager/addons"
-PTRO_DIR="/var/www/pterodactyl"
 
 ok() { echo -e "${GREEN}✅ $1${NC}"; }
 info() { echo -e "${CYAN}ℹ️  $1${NC}"; }
@@ -27,74 +25,130 @@ err() { echo -e "${RED}❌ $1${NC}"; }
 step() { echo -e "\n${MAGENTA}⚡ ${BOLD}$1${NC}"; }
 
 pause() {
-    echo -e "\n${CYAN}Press [ENTER] to continue...${NC}"
+    echo -e "\n${CYAN}Press [ENTER] to return to the menu...${NC}"
     read -r -s
 }
 
 show_banner() {
     clear
     echo -e "${CYAN}${BOLD}================================================================${NC}"
-    echo -e "${CYAN}${BOLD} 🧩 Ray Blueprint Addon Manager (Auto-Detect)"
+    echo -e "${CYAN}${BOLD} 🧩 Ray Addon Manager "
     echo -e "${CYAN}${BOLD}================================================================${NC}"
     echo ""
 }
 
-if [ "$EUID" -ne 0 ]; then err "Run as root!"; exit 1; fi
-
-if ! command -v blueprint >/dev/null 2>&1; then
-    err "Blueprint framework is not installed!"
-    info "Please install Blueprint from the main menu first."
-    pause; exit 1
+# Auto-Detect Panel Directory (Supports both Reviactyl and Pterodactyl)
+if [ -d "/var/www/reviactyl/public" ]; then
+    PANEL_DIR="/var/www/reviactyl"
+elif [ -d "/var/www/pterodactyl/public" ]; then
+    PANEL_DIR="/var/www/pterodactyl"
+else
+    err "No panel installation found! Please install Reviactyl or Pterodactyl first."
+    exit 1
 fi
 
-install_addon_from_repo() {
-    local addon_id="$1"
-    cd "$PTRO_DIR"
-    step "Fetching $addon_id from Ray Addons Repository..."
+ADDONS=(
+    "huxregister"
+    "loader"
+    "mcplugins"
+    "minecraftplayermanager"
+    "nebula"
+    "serverbackgrounds"
+    "subdomains"
+    "versionchanger"
+)
+
+install_addon() {
+    local addon_name="$1"
+    show_banner
+    echo -e "${MAGENTA}--- 🧩 Installing ${addon_name} ---${NC}"
     
-    if curl -sfL "$RAY_REPO/addons/${addon_id}.blueprint" -o "${addon_id}.blueprint"; then
-        step "Installing $addon_id..."
-        blueprint -install "$addon_id"
-        ok "$addon_id installed successfully!"
-    else
-        err "Could not find ${addon_id}.blueprint in your GitHub addons folder!"
+    cd "$PANEL_DIR"
+
+    step "Fetching ${addon_name} from Ray Addons Repository..."
+    
+    # -f makes curl fail silently on 404, preventing it from downloading an HTML error page
+    curl -sfL "$RAY_REPO/addons/${addon_name}.blueprint" -o "${addon_name}.blueprint"
+
+    # SAFETY CHECK: Verify the file actually downloaded!
+    if [ ! -s "${addon_name}.blueprint" ]; then
+        err "Failed to download ${addon_name}.blueprint!"
+        info "Make sure the file is uploaded to GitHub at:"
+        info "pterodactyl_manager/addons/${addon_name}.blueprint"
+        rm -f "${addon_name}.blueprint" # Clean up empty file
+        pause; return
     fi
+    
+    ok "Download successful!"
+
+    step "Executing Blueprint Installer..."
+    blueprint -i "${addon_name}"
+
+    ok "Addon ${addon_name} installed successfully!"
+    pause
+}
+
+install_all() {
+    show_banner
+    echo -e "${MAGENTA}--- 📦 Bulk Installing All Addons ---${NC}"
+    for addon in "${ADDONS[@]}"; do
+        install_addon "$addon"
+    done
+}
+
+install_custom() {
+    show_banner
+    echo -e "${MAGENTA}--- 🔗 Install Custom Addon ---${NC}"
+    read -p "Enter the direct download URL for the .blueprint file: " CUSTOM_URL
+    if [ -z "$CUSTOM_URL" ]; then err "URL required!"; pause; return; fi
+
+    # Extract filename from URL
+    FILE_NAME=$(basename "$CUSTOM_URL")
+    ADDON_NAME="${FILE_NAME%.*}"
+
+    cd "$PANEL_DIR"
+    step "Downloading ${FILE_NAME}..."
+    curl -sL "$CUSTOM_URL" -o "$FILE_NAME"
+
+    if [ ! -s "$FILE_NAME" ]; then
+        err "Download failed or file is empty!"
+        rm -f "$FILE_NAME"
+        pause; return
+    fi
+
+    step "Installing ${ADDON_NAME}..."
+    blueprint -i "$ADDON_NAME"
+    ok "Custom Addon installed!"
+    pause
+}
+
+remove_addon() {
+    show_banner
+    echo -e "${MAGENTA}--- 🗑️  Remove Addon ---${NC}"
+    read -p "Enter the exact name of the addon to remove (e.g., huxregister): " REMOVE_NAME
+    if [ -z "$REMOVE_NAME" ]; then err "Name required!"; pause; return; fi
+
+    cd "$PANEL_DIR"
+    step "Removing ${REMOVE_NAME}..."
+    blueprint -remove "$REMOVE_NAME"
+    ok "Addon removed!"
+    pause
 }
 
 # ==============================================================================
-# 📡 AUTO-DETECT ADDONS FROM GITHUB
-# ==============================================================================
-show_banner
-echo -e "${MAGENTA}⚡ Scanning Ray Addons Repository for blueprints...${NC}"
-
-# Fetch file names from GitHub API, filter for .blueprint, and format the names
-fetched_addons=$(curl -s "$API_URL" | grep '"name":' | grep '\.blueprint"' | awk -F'"' '{print $4}' | sed 's/\.blueprint//' || true)
-
-if [ -z "$fetched_addons" ]; then
-    warn "API rate limit reached or folder empty. Loading fallback list..."
-    # Fallback list just in case GitHub blocks the API request
-    addon_array=("eggchanger" "huxregister" "mclogs" "mcplugins" "minecraftplayermanager" "serverbackgrounds" "simplefavicons" "simplefooters")
-else
-    # Read the fetched items into an array
-    mapfile -t addon_array <<< "$fetched_addons"
-    ok "Found ${#addon_array[@]} addons!"
-fi
-
-sleep 1
-
-# ==============================================================================
-# 📋 DYNAMIC MENU LOOP
+# 📋 MENU LOOP
 # ==============================================================================
 while true; do
     show_banner
+    echo -e "${GREEN}Detected Panel at: $PANEL_DIR${NC}"
+    echo ""
     echo -e "${BOLD}--- 📦 Available Addons ---${NC}"
     
-    # Loop through the array and assign numbers automatically
     i=1
-    for addon in "${addon_array[@]}"; do
-        # Make the output look pretty (capitalize first letter)
-        pretty_name=$(echo "$addon" | sed -E 's/([a-z])([A-Z])/\1 \2/g' | awk '{for(j=1;j<=NF;j++)sub(/./,toupper(substr($j,1,1)),$j)}1')
-        echo "$i) 🧩 Install $pretty_name ($addon)"
+    for addon in "${ADDONS[@]}"; do
+        # Capitalize first letter for display
+        display_name="$(tr '[:lower:]' '[:upper:]' <<< ${addon:0:1})${addon:1}"
+        echo "$i) 🧩 Install $display_name ($addon)"
         ((i++))
     done
 
@@ -109,61 +163,18 @@ while true; do
     echo "0) 🔙 Return to Main Menu"
     echo ""
     
-    read -p "Select Option: " addon_choice
+    read -p "Select Option: " choice
 
-    # Handle dynamic number selection
-    if [[ "$addon_choice" =~ ^[0-9]+$ ]] && [ "$addon_choice" -gt 0 ] && [ "$addon_choice" -le "${#addon_array[@]}" ]; then
-        idx=$((addon_choice - 1))
-        selected_addon="${addon_array[$idx]}"
-        install_addon_from_repo "$selected_addon"
-        pause
-    # Handle static options
-    else
-        case "${addon_choice^^}" in # ^^ capitalizes input to handle lowercase a,b,c
-            A)
-                show_banner
-                echo -e "${MAGENTA}--- 📦 Installing ALL Addons ---${NC}"
-                for addon in "${addon_array[@]}"; do
-                    # Skip nebula from bulk install if it accidentally gets in the folder, as it's a theme not an addon
-                    if [ "$addon" != "nebula" ]; then
-                        install_addon_from_repo "$addon"
-                    fi
-                done
-                echo ""
-                ok "Bulk installation complete!"
-                pause
-                ;;
-                
-            B)
-                echo ""
-                read -p "🔗 Enter direct URL to .blueprint file: " ext_url
-                read -p "🏷️  Enter Addon identifier: " ext_name
-                if [[ -n "$ext_url" && -n "$ext_name" ]]; then
-                    cd "$PTRO_DIR"
-                    curl -sL "$ext_url" -o "${ext_name}.blueprint"
-                    blueprint -install "$ext_name"
-                    ok "Custom addon installed!"
-                else
-                    err "URL and Identifier required."
-                fi
-                pause
-                ;;
-                
-            C)
-                echo ""
-                read -p "🏷️  Enter Addon identifier to remove (e.g., eggchanger): " remove_name
-                if [ -n "$remove_name" ]; then
-                    cd "$PTRO_DIR"
-                    blueprint -remove "$remove_name"
-                    ok "$remove_name removed!"
-                else
-                    err "Identifier required."
-                fi
-                pause
-                ;;
-                
-            0) exit 0 ;;
-            *) err "Invalid option."; sleep 2 ;;
-        esac
-    fi
+    case "$choice" in
+        [1-8])
+            # Array is 0-indexed, so we subtract 1 from the choice
+            idx=$((choice-1))
+            install_addon "${ADDONS[$idx]}"
+            ;;
+        [Aa]) install_all ;;
+        [Bb]) install_custom ;;
+        [Cc]) remove_addon ;;
+        0) exit 0 ;;
+        *) err "Invalid option!"; sleep 2 ;;
+    esac
 done
