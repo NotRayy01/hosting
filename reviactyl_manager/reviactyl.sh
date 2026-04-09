@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# 🔮 Ray Reviactyl Manager (Pro Edition)
+# 🔮 Ray Reviactyl Manager 
 # ==============================================================================
 # 👑 Developed by Ray | 🏢 Ray Industries
 # ==============================================================================
@@ -76,7 +76,14 @@ install_reviactyl() {
     step "Updating system & installing core repositories..."
     apt-get update -qq && apt-get install -y software-properties-common curl apt-transport-https ca-certificates gnupg lsb-release -qq
     
-    LC_ALL=C.UTF-8 add-apt-repository -y ppa:ondrej/php >/dev/null 2>&1 || true
+    # OS-Aware PPA Injection
+    OS_CODENAME=$(lsb_release -cs)
+    if [[ "$OS_CODENAME" == "focal" || "$OS_CODENAME" == "jammy" ]]; then
+        info "Older Ubuntu version detected. Injecting ondrej/php PPA..."
+        LC_ALL=C.UTF-8 add-apt-repository -y ppa:ondrej/php >/dev/null 2>&1 || true
+    else
+        info "Modern Ubuntu version detected ($OS_CODENAME). Skipping legacy PHP PPA."
+    fi
     
     curl -fsSL https://packages.redis.io/gpg | gpg --dearmor -o /usr/share/keyrings/redis-archive-keyring.gpg --yes
     echo "deb [signed-by=/usr/share/keyrings/redis-archive-keyring.gpg] https://packages.redis.io/deb $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/redis.list >/dev/null
@@ -343,7 +350,6 @@ while true; do
     read -p "Select Option [0-5]: " choice
 
     case "$choice" in
-        # Added the pause commands HERE so it waits before looping!
         1) install_reviactyl; pause ;;
         2) config_webserver; pause ;;
         3) update_reviactyl; pause ;;
