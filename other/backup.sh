@@ -15,7 +15,7 @@ set -euo pipefail
 IFS=$'\n\t'
 
 # ── Colors ─────────────────────────────────────────────────────────────────────
-RED="\033[0;31m";    GREEN="\033[0;32m";   YELLOW="\033[1;33m"
+RED="\033[0;31m";    GREEN="\033[0;32m";    YELLOW="\033[1;33m"
 BLUE="\033[0;34m";   MAGENTA="\033[0;35m"; CYAN="\033[0;36m"
 WHITE="\033[1;37m";  DIM="\033[2m";        BOLD="\033[1m"; NC="\033[0m"
 BG_MAGENTA="\033[45m"; BG_CYAN="\033[46m"; BG_BLUE="\033[44m"
@@ -314,9 +314,11 @@ setup_backup_targets() {
         [ -f "/var/www/reviactyl/.env" ]    && ENV_FILE="/var/www/reviactyl/.env"
 
         if [ -n "$ENV_FILE" ]; then
-            AUTO_DB=$(grep "^DB_DATABASE=" "$ENV_FILE" | cut -d'=' -f2 | tr -d '"' | tr -d "'")
-            AUTO_USER=$(grep "^DB_USERNAME=" "$ENV_FILE" | cut -d'=' -f2 | tr -d '"' | tr -d "'")
-            AUTO_PASS=$(grep "^DB_PASSWORD=" "$ENV_FILE" | cut -d'=' -f2 | tr -d '"' | tr -d "'")
+            # Added || true to prevent set -e from crashing the script if grep fails
+            AUTO_DB=$(grep "^DB_DATABASE=" "$ENV_FILE" | cut -d'=' -f2 | tr -d '"' | tr -d "'" || true)
+            AUTO_USER=$(grep "^DB_USERNAME=" "$ENV_FILE" | cut -d'=' -f2 | tr -d '"' | tr -d "'" || true)
+            AUTO_PASS=$(grep "^DB_PASSWORD=" "$ENV_FILE" | cut -d'=' -f2 | tr -d '"' | tr -d "'" || true)
+            
             echo -ne "  ${CYAN}❯ ${NC}Database name [${AUTO_DB}]: "; read -r DB_NAME
             [ -z "$DB_NAME" ] && DB_NAME="$AUTO_DB"
             echo -ne "  ${CYAN}❯ ${NC}DB Username [${AUTO_USER}]: "; read -r DB_USER
@@ -599,8 +601,9 @@ show_summary() {
     divider
     echo ""
 
-    echo -ne "  ${YELLOW}❯ ${NC}Run a test backup RIGHT NOW? (y/N): "; read -r DO_TEST
-    if [[ "$DO_TEST" =~ [Yy] ]]; then
+    # Modified to default to YES if the user just presses Enter
+    echo -ne "  ${YELLOW}❯ ${NC}Run a test backup RIGHT NOW? (Y/n): "; read -r DO_TEST
+    if [[ -z "$DO_TEST" || "$DO_TEST" =~ [Yy] ]]; then
         echo ""
         step "Running test backup..."
         echo ""
