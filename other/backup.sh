@@ -51,9 +51,9 @@ echo -e "\n${COLOR_REG}=========================================================
 echo -e "${YELLOW}🔑 GOOGLE DRIVE AUTHENTICATION${NC}"
 echo -e "${COLOR_REG}======================================================================${NC}"
 echo -e "${INFO} Please run 'rclone authorize \"drive\" \"eyJzY29wZSI6ImRyaXZlIn0\"' on your PC."
-echo -e "${ARROW} Paste the generated JSON Token below (Direct input, no nano needed):"
+echo -e "${ARROW} Paste the generated JSON Token below:"
 echo -n "config_token> "
-read -r DRIVER_TOKEN
+read -r DRIVER_TOKEN < /dev/tty
 
 # Create rclone config folder if not exists
 mkdir -p ~/.config/rclone/
@@ -68,14 +68,12 @@ EOF
 
 echo -e "${TICK} Google Drive Configured successfully!"
 
-# 4. Folder Name Input
+# 4. Folder Name Input (Fixed and Secured)
 echo -e "\n${ARROW} Enter the Folder Name for this VPS (e.g., RayNodeIN3):"
-read -r FOLDER_NAME
-if [ -z "$FOLDER_NAME" ]; then
-    FOLDER_NAME="RayNode"
-fi
+read -r FOLDER_NAME < /dev/tty
+FOLDER_NAME="${FOLDER_NAME:-RayNode}"
 
-# 5. Backup Type Selection
+# 5. Backup Type Selection (Fixed and Secured)
 echo -e "\n${COLOR_REG}======================================================================${NC}"
 echo -e "${YELLOW}📁 SELECT BACKUP TYPE${NC}"
 echo -e "${COLOR_REG}======================================================================${NC}"
@@ -83,7 +81,8 @@ echo -e "1) Only Pterodactyl Node (Server Volumes)"
 echo -e "2) Only Pterodactyl Panel (Database + Panel Files)"
 echo -e "3) Both (Node & Panel)"
 echo -n "Choose an option [1-3]: "
-read -r BACKUP_OPTION
+read -r BACKUP_OPTION < /dev/tty
+BACKUP_OPTION="${BACKUP_OPTION:-1}"
 
 # 6. Dynamically Generate the Final Backup Script
 BACKUP_SCRIPT_PATH="/root/auto_backup.sh"
@@ -95,14 +94,14 @@ BACKUP_TEMP_DIR="/tmp/pterodactyl_backups"
 GDRIVE_REMOTE="gdrive:backups"
 EOF
 
-# Inject variables into the generated script
+# Inject variables into the generated script safely
 sed -i "3i FOLDER_NAME=\"$FOLDER_NAME\"" $BACKUP_SCRIPT_PATH
 sed -i "4i OPTION=\"$BACKUP_OPTION\"" $BACKUP_SCRIPT_PATH
 
-# Append the logical part of the backup script with DATE feature and auto-delete
+# Append the logical part of the backup script
 cat <<'EOF' >> $BACKUP_SCRIPT_PATH
 
-# Purana temporary folder clean karke naya banana
+# Cleanup and setup temp dir
 rm -rf "$BACKUP_TEMP_DIR"
 mkdir -p "$BACKUP_TEMP_DIR"
 
@@ -146,13 +145,12 @@ if [ "$OPTION" -eq 2 ] || [ "$OPTION" -eq 3 ]; then
     fi
 fi
 
-# --- UPLOAD TO GDRIVE & FORCE DELETE FROM VPS ---
+# --- UPLOAD TO GDRIVE & AUTO-DELETE LOCAL ---
 if [ -d "$BACKUP_TEMP_DIR" ]; then
-    # 'move' command automatic files upload karke unhe local storage se delete kar deti hai
     rclone move "$BACKUP_TEMP_DIR" "$GDRIVE_REMOTE/$FOLDER_NAME" --log-file=/var/log/rclone_backup.log
 fi
 
-# Hard Cleanup - Taki temp directory poori tarah khali ho jaye
+# Final Hard Cleanup
 rm -rf "$BACKUP_TEMP_DIR"
 EOF
 
@@ -168,7 +166,7 @@ echo -e "\n${COLOR_REG}=========================================================
 echo -e "${YELLOW}📊 SETUP COMPLETED SUCCESSFULLY BY RAY${NC}"
 echo -e "${COLOR_REG}======================================================================${NC}"
 echo -n -e "${ARROW} Do you want to test the backup system right now? (y/n): "
-read -r TEST_NOW
+read -r TEST_NOW < /dev/tty
 
 if [[ "$TEST_NOW" =~ ^([yY][eE][sS]|[yY])$ ]]; then
     echo -e "\n${INFO} Running backup test in background... Please wait..."
