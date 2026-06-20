@@ -68,12 +68,12 @@ EOF
 
 echo -e "${TICK} Google Drive Configured successfully!"
 
-# 4. Folder Name Input (Fixed and Secured)
+# 4. Folder Name Input
 echo -e "\n${ARROW} Enter the Folder Name for this VPS (e.g., RayNodeIN3):"
 read -r FOLDER_NAME < /dev/tty
 FOLDER_NAME="${FOLDER_NAME:-RayNode}"
 
-# 5. Backup Type Selection (Fixed and Secured)
+# 5. Backup Type Selection
 echo -e "\n${COLOR_REG}======================================================================${NC}"
 echo -e "${YELLOW}📁 SELECT BACKUP TYPE${NC}"
 echo -e "${COLOR_REG}======================================================================${NC}"
@@ -98,18 +98,22 @@ EOF
 sed -i "3i FOLDER_NAME=\"$FOLDER_NAME\"" $BACKUP_SCRIPT_PATH
 sed -i "4i OPTION=\"$BACKUP_OPTION\"" $BACKUP_SCRIPT_PATH
 
-# Append the logical part of the backup script
+# Append the logical part of the backup script with auto folder creation
 cat <<'EOF' >> $BACKUP_SCRIPT_PATH
 
 # Cleanup and setup temp dir
 rm -rf "$BACKUP_TEMP_DIR"
 mkdir -p "$BACKUP_TEMP_DIR"
 
+# Google Drive par pehle hi directory structure bana dena taaki empty na dikhe
+rclone mkdir "$GDRIVE_REMOTE/$FOLDER_NAME" --log-file=/var/log/rclone_backup.log
+
 # --- NODE BACKUP ENGINE ---
 if [ "$OPTION" -eq 1 ] || [ "$OPTION" -eq 3 ]; then
     NODE_DIR="/var/lib/pterodactyl/volumes"
     NODE_TEMP="$BACKUP_TEMP_DIR/node/servers"
     mkdir -p "$NODE_TEMP"
+    rclone mkdir "$GDRIVE_REMOTE/$FOLDER_NAME/node/servers" 2>/dev/null
     
     if [ -d "$NODE_DIR" ]; then
         cd "$NODE_DIR" || exit
@@ -126,6 +130,7 @@ if [ "$OPTION" -eq 2 ] || [ "$OPTION" -eq 3 ]; then
     PANEL_DIR="/var/www/pterodactyl"
     PANEL_TEMP="$BACKUP_TEMP_DIR/panel"
     mkdir -p "$PANEL_TEMP"
+    rclone mkdir "$GDRIVE_REMOTE/$FOLDER_NAME/panel" 2>/dev/null
     
     # 1. Zip Panel Files
     if [ -d "$PANEL_DIR" ]; then
@@ -169,7 +174,7 @@ echo -n -e "${ARROW} Do you want to test the backup system right now? (y/n): "
 read -r TEST_NOW < /dev/tty
 
 if [[ "$TEST_NOW" =~ ^([yY][eE][sS]|[yY])$ ]]; then
-    echo -e "\n${INFO} Running backup test in background... Please wait..."
+    echo -e "\n${INFO} Running backup test... Please wait..."
     /bin/bash $BACKUP_SCRIPT_PATH
     echo -e "${TICK} ${GREEN}Test finished! Check your Google Drive 'backups/$FOLDER_NAME/' folder!${NC}"
     echo -e "${TICK} Local temporary backup files have been cleared from VPS! 🎉\n"
