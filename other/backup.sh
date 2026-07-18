@@ -166,6 +166,41 @@ read_secret() {
     printf '%s' "$answer"
 }
 
+read_json_token() {
+    local token="" line candidate
+    printf '%b\n' "${CYAN}┌──────────────── GOOGLE TOKEN INPUT ────────────────┐${RESET}" > /dev/tty
+    printf '%b\n' "${WHITE}Paste the complete JSON token below.${RESET}" > /dev/tty
+    printf '%b\n' "${DIM}Single-line JSON is accepted immediately.${RESET}" > /dev/tty
+    printf '%b\n' "${DIM}For multi-line JSON, keep pasting until the closing } appears.${RESET}" > /dev/tty
+    printf '%b\n' "${YELLOW}The token will be visible while pasting, but will not be printed again.${RESET}" > /dev/tty
+    printf '%b\n' "${CYAN}└─────────────────────────────────────────────────────┘${RESET}" > /dev/tty
+    printf '%b' "${CYAN}json>${RESET} " > /dev/tty
+
+    while IFS= read -r line < /dev/tty; do
+        token+="${token:+$'\n'}$line"
+        if jq -e 'type == "object" and (.access_token? != null or .refresh_token? != null)' \
+            >/dev/null 2>&1 <<< "$token"; then
+            printf '%s' "$token"
+            return 0
+        fi
+        [[ -n "$line" ]] || break
+        printf '%b' "${CYAN}...>${RESET} " > /dev/tty
+    done
+
+    # If users accidentally include rclone's arrow/label lines, keep only the
+    # JSON object between the first opening and last closing brace.
+    if [[ "$token" == *'{'* && "$token" == *'}'* ]]; then
+        candidate="{${token#*\{}"
+        candidate="${candidate%\}*}}"
+        if jq -e 'type == "object" and (.access_token? != null or .refresh_token? != null)' \
+            >/dev/null 2>&1 <<< "$candidate"; then
+            printf '%s' "$candidate"
+            return 0
+        fi
+    fi
+    return 1
+}
+
 confirm() {
     local prompt="$1" default="${2:-n}" answer
     answer="$(read_tty "$prompt (y/n)" "$default")"
@@ -377,7 +412,7 @@ cleanup_legacy_install() {
     fi
 
     if rclone_cmd listremotes 2>/dev/null | grep -qx 'gdrive:'; then
-        info "Existing gdrive remote detected. Its account token will be replaced during Google Drive authorization."
+        info "Existing gdrive remote detected. Setup can reuse it or replace its account token."
         info "Other rclone remotes and their settings will remain untouched."
         found=1
     fi
@@ -448,23 +483,36 @@ rclone_cmd() {
 }
 
 configure_drive() {
+    local mode="${1:-setup}" token backup="" existed=0
     step "Connect a Google Drive account"
+    install -d -m 700 "$(dirname "$RCLONE_CONFIG")"
+    rclone_cmd listremotes 2>/dev/null | grep -qx 'gdrive:' && existed=1 || true
+
+    if (( existed )) && [[ "$mode" != "change" ]] && \
+       rclone_cmd lsd "$RCLONE_REMOTE:" --contimeout 10s --timeout 30s >/dev/null 2>&1; then
+        ok "A working Google Drive configuration named gdrive is already available."
+        if confirm "Reuse this existing Google Drive account without pasting JSON?" "y"; then
+            if rclone_cmd mkdir "$RCLONE_REMOTE:$DRIVE_ROOT" >/dev/null 2>&1; then
+                ok "Existing Google Drive account reused successfully."
+                return 0
+            fi
+            error "The existing account could not create $DRIVE_ROOT. New authorization is required."
+        fi
+    fi
+
     printf '%b\n' "${WHITE}On your PC, run:${RESET}"
     printf '%b\n\n' "  ${YELLOW}rclone authorize \"drive\" \"eyJzY29wZSI6ImRyaXZlIn0\"${RESET}"
     info "Sign in to the Google account that should receive future backups."
-    local token backup="" existed=0
-    token="$(read_secret "Paste the generated JSON token")"
-    if [[ -z "$token" ]] || ! jq -e . >/dev/null 2>&1 <<< "$token"; then
-        error "That token is empty or is not valid JSON. Google Drive was not changed."
+    if ! token="$(read_json_token)"; then
+        error "A complete Google Drive JSON token was not detected. Google Drive was not changed."
+        info "Tip: use right-click or Shift+Insert to paste in most VPS terminals."
         return 1
     fi
 
-    install -d -m 700 "$(dirname "$RCLONE_CONFIG")"
     if [[ -f "$RCLONE_CONFIG" ]]; then
         backup="$(mktemp)"
         cp -a "$RCLONE_CONFIG" "$backup"
     fi
-    rclone_cmd listremotes 2>/dev/null | grep -qx 'gdrive:' && existed=1 || true
 
     if (( existed )); then
         rclone_cmd config update "$RCLONE_REMOTE" scope drive token "$token" --non-interactive >/dev/null
@@ -1351,7 +1399,7 @@ manager_menu() {
         choice="$(read_tty "Select an option" "1")"
         case "$choice" in
             1) run_backup 1 && ok "Backup completed." || error "Backup completed with errors. Check $BACKUP_LOG." ;;
-            2) configure_drive ;;
+            2) configure_drive "change" ;;
             3) change_node_folder ;;
             4) configure_retention; save_config; ok "Retention updated to $RETENTION_DAYS day(s)." ;;
             5) configure_time; save_config; [[ "$ENABLED" == "1" ]] && write_cron; ok "Backup schedule updated." ;;
