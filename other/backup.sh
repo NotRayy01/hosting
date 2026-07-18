@@ -22,7 +22,7 @@ readonly TMP_ROOT="/var/tmp/rhm-backup"
 readonly RCLONE_CONFIG="/root/.config/rclone/rclone.conf"
 readonly RCLONE_REMOTE="gdrive"
 readonly DRIVE_ROOT="RHM-Backups"
-readonly SCRIPT_SOURCE_URL="https://raw.githubusercontent.com/NotRayy01/hosting/refs/heads/main/other/backup.sh"
+readonly SCRIPT_SOURCE_URL="https://raw.githubusercontent.com/NotRayy01/hosting/refs/heads/main/backup.sh"
 readonly CRON_FILE="/etc/cron.d/rhm-backup"
 readonly LOGROTATE_FILE="/etc/logrotate.d/rhm-backup"
 readonly LOCK_FILE="/run/lock/rhm-backup.lock"
@@ -166,21 +166,76 @@ read_secret() {
     printf '%s' "$answer"
 }
 
+normalize_drive_token() {
+    local input="$1" compact decoded inner remainder padding
+
+    # Raw OAuth token JSON.
+    if jq -e 'type == "object" and (.access_token? != null or .refresh_token? != null)' \
+        >/dev/null 2>&1 <<< "$input"; then
+        jq -c . <<< "$input"
+        return 0
+    fi
+
+    # Decoded rclone config object: {"token":"{...oauth json...}"}
+    if jq -e 'type == "object" and (.token? != null)' >/dev/null 2>&1 <<< "$input"; then
+        inner="$(jq -r 'if (.token | type) == "string" then .token else (.token | tojson) end' <<< "$input")"
+        if jq -e 'type == "object" and (.access_token? != null or .refresh_token? != null)' \
+            >/dev/null 2>&1 <<< "$inner"; then
+            jq -c . <<< "$inner"
+            return 0
+        fi
+    fi
+
+    # rclone authorize commonly returns a Base64 config_token beginning with
+    # eyJ..., not visible JSON. Strip labels/whitespace and decode it safely.
+    compact="$input"
+    if [[ "$compact" == *config_token\>* ]]; then
+        compact="${compact#*config_token> }"
+        compact="${compact#*config_token>}"
+    fi
+    compact="$(printf '%s' "$compact" | tr -d '[:space:]')"
+    [[ "$compact" =~ ^[A-Za-z0-9_+/=-]+$ ]] || return 1
+    compact="${compact//-/+}"
+    compact="${compact//_/\/}"
+    remainder=$((${#compact} % 4))
+    case "$remainder" in
+        0) padding="" ;;
+        2) padding="==" ;;
+        3) padding="=" ;;
+        *) return 1 ;;
+    esac
+    decoded="$(printf '%s%s' "$compact" "$padding" | base64 --decode 2>/dev/null)" || return 1
+
+    if jq -e 'type == "object" and (.access_token? != null or .refresh_token? != null)' \
+        >/dev/null 2>&1 <<< "$decoded"; then
+        jq -c . <<< "$decoded"
+        return 0
+    fi
+    if jq -e 'type == "object" and (.token? != null)' >/dev/null 2>&1 <<< "$decoded"; then
+        inner="$(jq -r 'if (.token | type) == "string" then .token else (.token | tojson) end' <<< "$decoded")"
+        if jq -e 'type == "object" and (.access_token? != null or .refresh_token? != null)' \
+            >/dev/null 2>&1 <<< "$inner"; then
+            jq -c . <<< "$inner"
+            return 0
+        fi
+    fi
+    return 1
+}
+
 read_json_token() {
-    local token="" line candidate
+    local token="" line candidate normalized
     printf '%b\n' "${CYAN}┌──────────────── GOOGLE TOKEN INPUT ────────────────┐${RESET}" > /dev/tty
-    printf '%b\n' "${WHITE}Paste the complete JSON token below.${RESET}" > /dev/tty
-    printf '%b\n' "${DIM}Single-line JSON is accepted immediately.${RESET}" > /dev/tty
-    printf '%b\n' "${DIM}For multi-line JSON, keep pasting until the closing } appears.${RESET}" > /dev/tty
-    printf '%b\n' "${YELLOW}The token will be visible while pasting, but will not be printed again.${RESET}" > /dev/tty
+    printf '%b\n' "${WHITE}Paste the complete token shown after config_token>.${RESET}" > /dev/tty
+    printf '%b\n' "${DIM}Encoded eyJ... tokens and raw JSON are both supported.${RESET}" > /dev/tty
+    printf '%b\n' "${DIM}Single-line tokens are accepted immediately.${RESET}" > /dev/tty
+    printf '%b\n' "${YELLOW}The token is visible while pasting, but will not be printed again.${RESET}" > /dev/tty
     printf '%b\n' "${CYAN}└─────────────────────────────────────────────────────┘${RESET}" > /dev/tty
-    printf '%b' "${CYAN}json>${RESET} " > /dev/tty
+    printf '%b' "${CYAN}token>${RESET} " > /dev/tty
 
     while IFS= read -r line < /dev/tty; do
         token+="${token:+$'\n'}$line"
-        if jq -e 'type == "object" and (.access_token? != null or .refresh_token? != null)' \
-            >/dev/null 2>&1 <<< "$token"; then
-            printf '%s' "$token"
+        if normalized="$(normalize_drive_token "$token")"; then
+            printf '%s' "$normalized"
             return 0
         fi
         [[ -n "$line" ]] || break
@@ -192,9 +247,8 @@ read_json_token() {
     if [[ "$token" == *'{'* && "$token" == *'}'* ]]; then
         candidate="{${token#*\{}"
         candidate="${candidate%\}*}}"
-        if jq -e 'type == "object" and (.access_token? != null or .refresh_token? != null)' \
-            >/dev/null 2>&1 <<< "$candidate"; then
-            printf '%s' "$candidate"
+        if normalized="$(normalize_drive_token "$candidate")"; then
+            printf '%s' "$normalized"
             return 0
         fi
     fi
@@ -504,7 +558,7 @@ configure_drive() {
     printf '%b\n\n' "  ${YELLOW}rclone authorize \"drive\" \"eyJzY29wZSI6ImRyaXZlIn0\"${RESET}"
     info "Sign in to the Google account that should receive future backups."
     if ! token="$(read_json_token)"; then
-        error "A complete Google Drive JSON token was not detected. Google Drive was not changed."
+        error "A complete Google Drive config token or OAuth JSON token was not detected. Google Drive was not changed."
         info "Tip: use right-click or Shift+Insert to paste in most VPS terminals."
         return 1
     fi
