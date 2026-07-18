@@ -1149,6 +1149,8 @@ create_database_backup() {
     local run_dir="$1" timestamp="$2" env_file="/var/www/pterodactyl/.env"
     [[ -f "$env_file" ]] || { log_line ERROR "Panel .env was not found; database backup skipped."; return 1; }
     local dump_cmd db_host db_port db_name db_user db_password client_cnf sql_file archive remote
+    local dump_error dump_ok=0 first_error
+    local -a dump_options
     dump_cmd="$(command -v mysqldump || command -v mariadb-dump || true)"
     [[ -n "$dump_cmd" ]] || { log_line ERROR "mysqldump/mariadb-dump is not installed."; return 1; }
 
@@ -1169,15 +1171,38 @@ create_database_backup() {
     } > "$client_cnf"
     sql_file="$run_dir/panel_database_${timestamp}.sql"
     archive="$sql_file.gz"
+    dump_error="$run_dir/database-dump-error.log"
+    dump_options=(--single-transaction --quick --routines --triggers --events --hex-blob "$db_name")
     log_line INFO "Creating a consistent Panel database dump."
-    if "$dump_cmd" --defaults-extra-file="$client_cnf" --single-transaction --quick \
-        --routines --triggers --events --hex-blob "$db_name" > "$sql_file" && [[ -s "$sql_file" ]]; then
+    if "$dump_cmd" --defaults-extra-file="$client_cnf" "${dump_options[@]}" \
+        > "$sql_file" 2> "$dump_error" && [[ -s "$sql_file" ]]; then
+        dump_ok=1
+    else
+        first_error="$(head -n1 "$dump_error" 2>/dev/null || true)"
+        [[ -n "$first_error" ]] && log_line WARN "Configured database login failed: $first_error"
+
+        # Ubuntu/Debian MariaDB commonly protects local root with unix_socket.
+        # Because RHM itself requires OS root, a read-only local socket dump is
+        # a safe fallback. It never changes users, passwords, grants, or .env.
+        if [[ "$db_host" == "127.0.0.1" || "$db_host" == "localhost" || "$db_host" == "::1" ]] && \
+           [[ ${EUID:-$(id -u)} -eq 0 ]]; then
+            warn "Trying local MariaDB root socket authentication for this backup only."
+            : > "$sql_file"
+            if "$dump_cmd" --protocol=socket --user=root "${dump_options[@]}" \
+                > "$sql_file" 2>> "$dump_error" && [[ -s "$sql_file" ]]; then
+                dump_ok=1
+                log_line INFO "Database dump succeeded through local root socket fallback."
+            fi
+        fi
+    fi
+
+    if (( dump_ok )); then
         gzip -f "$sql_file"
-        rm -f "$client_cnf"
+        rm -f "$client_cnf" "$dump_error"
         remote="$(remote_path "Database/$timestamp/panel_database.sql.gz")"
         verify_and_remove_local "$archive" "$remote"
     else
-        rm -f "$client_cnf" "$sql_file"
+        rm -f "$client_cnf" "$sql_file" "$dump_error"
         log_line ERROR "Database dump failed; no empty backup was uploaded."
         return 1
     fi
@@ -1261,6 +1286,40 @@ run_backup() {
         record_run_status "failed" "$started_epoch" "$finished_epoch" "One or more backup tasks failed"
         notify_backup_result "failed" "$timestamp" "$duration"
         log_line ERROR "Backup finished with errors. Check $BACKUP_LOG and $run_dir"
+    fi
+    return "$result"
+}
+
+run_database_only() {
+    load_config
+    ensure_dirs
+    exec 9>"$LOCK_FILE"
+    if ! flock -n 9; then
+        warn "Another RHM task is running. Try again after it finishes."
+        return 1
+    fi
+
+    local timestamp run_dir result=0
+    timestamp="$(date '+%Y-%m-%d_%H-%M-%S')"
+    run_dir="$TMP_ROOT/database-$timestamp"
+    install -d -m 700 "$run_dir"
+    log_line INFO "========== Database-only backup started: $timestamp =========="
+
+    if ! rclone_cmd mkdir "$RCLONE_REMOTE:$DRIVE_ROOT" >/dev/null 2>&1; then
+        rm -rf -- "$run_dir"
+        error "Google Drive is unavailable; database backup was not started."
+        return 1
+    fi
+    create_database_backup "$run_dir" "$timestamp" || result=1
+    (( result == 0 )) && apply_retention || true
+    rm -f -- "$run_dir/mysql-client.cnf" "$run_dir/database-dump-error.log"
+    if (( result == 0 )); then
+        rm -rf -- "$run_dir"
+        ok "Database backup uploaded and verified successfully."
+        log_line INFO "========== Database-only backup completed =========="
+    else
+        find "$run_dir" -depth -type d -empty -delete 2>/dev/null || true
+        error "Database backup failed. Check $BACKUP_LOG."
     fi
     return "$result"
 }
@@ -1448,6 +1507,7 @@ manager_menu() {
         printf '%b\n' "${WHITE}10)${RESET} 🩺 Run system health check"
         printf '%b\n' "${WHITE}11)${RESET} 📜 View recent logs"
         printf '%b\n' "${WHITE}12)${RESET} 🔄 Retry failed uploads only"
+        printf '%b\n' "${WHITE}13)${RESET} 🗄️  Back up Panel database only"
         printf '%b\n' "${WHITE}0)${RESET} Exit"
         printf '\n'
         choice="$(read_tty "Select an option" "1")"
@@ -1464,6 +1524,7 @@ manager_menu() {
             10) system_health_check || true ;;
             11) show_recent_logs ;;
             12) manual_retry_failed_uploads || true ;;
+            13) run_database_only || true ;;
             0) printf '%b\n' "${PURPLE}Goodbye, Ray. Your backups stay protected. 👋${RESET}"; return 0 ;;
             *) warn "Unknown option." ;;
         esac
@@ -1480,8 +1541,11 @@ main() {
         --monitor)
             ensure_dirs; load_config; run_monitor
             ;;
+        --database)
+            ensure_dirs; load_config; run_database_only
+            ;;
         --help)
-            printf 'Usage: %s [--backup|--monitor]\n' "$0"
+            printf 'Usage: %s [--backup|--monitor|--database]\n' "$0"
             ;;
         "")
             ensure_dirs
