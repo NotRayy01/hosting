@@ -27,6 +27,8 @@ readonly CRON_FILE="/etc/cron.d/rhm-backup"
 readonly LOGROTATE_FILE="/etc/logrotate.d/rhm-backup"
 readonly LOCK_FILE="/run/lock/rhm-backup.lock"
 readonly LAST_RUN_FILE="$STATE_DIR/last-run.json"
+readonly RECOVERY_STATE_FILE="$STATE_DIR/recovery-state.json"
+readonly RECOVERY_LOG="$LOG_DIR/recovery.log"
 readonly LEGACY_SCRIPT="/root/auto_backup.sh"
 readonly LEGACY_TEMP_DIR="/tmp/pterodactyl_backups"
 readonly LEGACY_LOG="/var/log/rclone_backup.log"
@@ -392,7 +394,7 @@ install_dependencies() {
     ok "Dependencies are ready."
 }
 
-legacy_script_is_rhm_v1() {
+legacy_script_is_verified() {
     [[ -f "$LEGACY_SCRIPT" ]] || return 1
     grep -Fq 'BACKUP_TEMP_DIR="/tmp/pterodactyl_backups"' "$LEGACY_SCRIPT" && \
         grep -Fq 'GDRIVE_REMOTE="gdrive:backups"' "$LEGACY_SCRIPT"
@@ -400,7 +402,7 @@ legacy_script_is_rhm_v1() {
 
 remove_legacy_cron() {
     local current temp
-    if [[ -e "$LEGACY_SCRIPT" ]] && ! legacy_script_is_rhm_v1; then
+    if [[ -e "$LEGACY_SCRIPT" ]] && ! legacy_script_is_verified; then
         return 2
     fi
     current="$(crontab -l 2>/dev/null || true)"
@@ -426,7 +428,7 @@ cleanup_legacy_install() {
         info "No legacy /root/auto_backup.sh cron entry found."
     fi
 
-    if legacy_script_is_rhm_v1; then
+    if legacy_script_is_verified; then
         rm -f -- "$LEGACY_SCRIPT"
         ok "Removed verified legacy backup engine: $LEGACY_SCRIPT"
         found=1
@@ -1210,8 +1212,15 @@ create_database_backup() {
 
 apply_retention() {
     log_line INFO "Removing Drive backup files older than $RETENTION_DAYS day(s)."
-    if rclone_cmd delete "$RCLONE_REMOTE:$DRIVE_ROOT" --min-age "${RETENTION_DAYS}d" \
-        --log-file "$BACKUP_LOG"; then
+    local target failed=0
+    # Manual-Safety is intentionally excluded: automatic retention must never
+    # remove rollback snapshots created before restore/shift operations.
+    for target in Panel Database Nodes; do
+        rclone_cmd mkdir "$RCLONE_REMOTE:$DRIVE_ROOT/$target" >/dev/null 2>&1 || { failed=1; continue; }
+        rclone_cmd delete "$RCLONE_REMOTE:$DRIVE_ROOT/$target" --min-age "${RETENTION_DAYS}d" \
+            --log-file "$BACKUP_LOG" || failed=1
+    done
+    if (( failed == 0 )); then
         rclone_cmd rmdirs "$RCLONE_REMOTE:$DRIVE_ROOT" --leave-root >/dev/null 2>&1 || true
         log_line INFO "Retention cleanup completed."
     else
@@ -1408,7 +1417,7 @@ system_health_check() {
 
 show_status() {
     local drive_status="Not connected" cron_status="Stopped" deletion_status="Needs setup" pending_count=0
-    local last_run="Never" failed_count notification_status="Off"
+    local last_run="Never" failed_count notification_status="Off" recovery_status="None"
     rclone_cmd lsd "$RCLONE_REMOTE:$DRIVE_ROOT" >/dev/null 2>&1 && drive_status="Connected"
     [[ "$ENABLED" == "1" && -f "$CRON_FILE" ]] && cron_status="Running"
     if [[ -n "$PANEL_URL" && -n "$PANEL_API_KEY" && "$PANEL_NODE_ID" =~ ^[0-9]+$ && -n "$DISCORD_WEBHOOK" ]]; then
@@ -1428,6 +1437,9 @@ show_status() {
             last_run="${last_result^} — $(date -d "@$last_epoch" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || printf '%s' "$last_epoch")"
         fi
     fi
+    if [[ -f "$RECOVERY_STATE_FILE" ]] && jq -e . "$RECOVERY_STATE_FILE" >/dev/null 2>&1; then
+        recovery_status="$(jq -r '.status // "unknown"' "$RECOVERY_STATE_FILE")"
+    fi
 
     printf '%b\n' "${CYAN}┌────────────────── RHM STATUS ──────────────────┐${RESET}"
     printf '%-24s %s (%s)\n' "Operating system" "$OS_NAME" "$OS_ARCH"
@@ -1441,11 +1453,878 @@ show_status() {
     printf '%-24s %s\n' "Deletion protection" "$deletion_status"
     printf '%-24s %s\n' "Backup notifications" "$notification_status"
     printf '%-24s %s\n' "Last backup" "$last_run"
+    printf '%-24s %s\n' "Last restore/shift" "$recovery_status"
     printf '%-24s %s\n' "Failed local retries" "$failed_count"
     printf '%-24s %s\n' "Integrity files" "SHA-256 enabled"
     printf '%-24s %s\n' "Deletion grace period" "24 hours"
     printf '%-24s %s\n' "Pending deletions" "$pending_count"
     printf '%b\n' "${CYAN}└─────────────────────────────────────────────────┘${RESET}"
+    case "$recovery_status" in
+        failed|applying|interrupted)
+            warn "A $recovery_status recovery operation has a preserved rollback workspace."
+            warn "Use manager option 16 before starting another restore or shift."
+            ;;
+    esac
+}
+
+valid_recovery_timestamp() {
+    [[ "$1" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2}$ ]]
+}
+
+valid_server_uuid() {
+    [[ "$1" =~ ^[A-Fa-f0-9]{8}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{12}$ ]]
+}
+
+safe_recovery_name() {
+    [[ -n "$1" && "$1" != "." && "$1" != ".." && "$1" =~ ^[A-Za-z0-9._-]+$ ]]
+}
+
+drive_file_size() {
+    local remote="$1"
+    rclone_cmd size "$remote" --json --contimeout 10s --timeout 60s 2>/dev/null | jq -r '.bytes // empty'
+}
+
+drive_file_exists() {
+    local size
+    size="$(drive_file_size "$1")"
+    valid_integer "${size:-}"
+}
+
+validate_tar_archive() {
+    local archive="$1" entry
+    gzip -t "$archive" >/dev/null 2>&1 || return 1
+    while IFS= read -r entry; do
+        [[ "$entry" == /* ]] && return 1
+        [[ "/$entry/" == *'/../'* ]] && return 1
+    done < <(tar -tzf "$archive" 2>/dev/null) || return 1
+    tar -tzf "$archive" >/dev/null 2>&1
+}
+
+download_recovery_file() {
+    local remote="$1" local_file="$2" kind="$3" size available required
+    local checksum_file expected actual
+    [[ "$remote" == "$RCLONE_REMOTE:$DRIVE_ROOT/"* ]] || {
+        error "Rejected recovery source outside $DRIVE_ROOT."
+        return 1
+    }
+    size="$(drive_file_size "$remote")"
+    valid_integer "${size:-}" || { error "Backup file not found: $remote"; return 1; }
+    available="$(df --output=avail --block-size=1 "$TMP_ROOT" 2>/dev/null | awk 'NR==2 {print $1}')"
+    required=$((size * 2 + 512 * 1024 * 1024))
+    if valid_integer "${available:-}" && (( available < required )); then
+        error "Not enough local space to safely download and extract $(basename "$remote")."
+        return 1
+    fi
+    install -d -m 700 "$(dirname "$local_file")"
+    info "Downloading $(basename "$remote")…"
+    if ! rclone_cmd copyto "$remote" "$local_file" --retries 3 --low-level-retries 10 \
+        --log-file "$RECOVERY_LOG"; then
+        error "Download failed: $remote"
+        return 1
+    fi
+    [[ -s "$local_file" && "$(stat -c '%s' "$local_file")" == "$size" ]] || {
+        error "Downloaded file size verification failed."
+        return 1
+    }
+
+    checksum_file="${local_file}.sha256"
+    if rclone_cmd copyto "${remote}.sha256" "$checksum_file" --retries 2 \
+        --log-file "$RECOVERY_LOG" >/dev/null 2>&1; then
+        expected="$(awk 'NR==1 {print $1}' "$checksum_file")"
+        actual="$(sha256sum "$local_file" | awk '{print $1}')"
+        if [[ ! "$expected" =~ ^[A-Fa-f0-9]{64}$ || "$actual" != "$expected" ]]; then
+            error "SHA-256 verification failed for $(basename "$remote")."
+            return 1
+        fi
+        ok "SHA-256 verified: $(basename "$remote")"
+    else
+        warn "No SHA-256 sidecar found; using archive integrity validation only."
+    fi
+
+    case "$kind" in
+        tar) validate_tar_archive "$local_file" || { error "Unsafe or corrupted tar archive rejected."; return 1; } ;;
+        database) gzip -t "$local_file" >/dev/null 2>&1 || { error "Corrupted database archive rejected."; return 1; } ;;
+    esac
+}
+
+select_restore_point() {
+    local root="$RCLONE_REMOTE:$DRIVE_ROOT" choice selected="" item index=1
+    local -a points=()
+    mapfile -t points < <(rclone_cmd lsf "$root" --recursive --files-only 2>/dev/null | \
+        grep -Ev '^Manual-Safety/' | \
+        grep -Eo '[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2}' | sort -ru)
+    ((${#points[@]} > 0)) || { error "No dated RHM backups were found in Google Drive."; return 1; }
+
+    printf '%b\n' "${WHITE}Available restore points (newest first):${RESET}" > /dev/tty
+    for item in "${points[@]:0:20}"; do
+        printf '  %2d) %s\n' "$index" "$item" > /dev/tty
+        index=$((index + 1))
+    done
+    choice="$(read_tty "Choose number, full timestamp, or date (YYYY-MM-DD)" "1")"
+    if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#points[@]} )); then
+        selected="${points[choice-1]}"
+    elif valid_recovery_timestamp "$choice"; then
+        selected="$choice"
+    elif [[ "$choice" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+        for item in "${points[@]}"; do
+            [[ "$item" == "$choice"_* ]] && { selected="$item"; break; }
+        done
+    fi
+    valid_recovery_timestamp "$selected" || { error "Invalid or unavailable restore date."; return 1; }
+    printf '%s' "$selected"
+}
+
+select_remote_node() {
+    local base="$RCLONE_REMOTE:$DRIVE_ROOT/Nodes" choice item index=1 selected=""
+    local -a nodes=()
+    mapfile -t nodes < <(rclone_cmd lsf "$base" --dirs-only 2>/dev/null | sed 's:/$::' | sort)
+    ((${#nodes[@]} > 0)) || { error "No Node backup folders found in Drive."; return 1; }
+    printf '%b\n' "${WHITE}Available Node backup folders:${RESET}" > /dev/tty
+    for item in "${nodes[@]}"; do
+        printf '  %2d) %s\n' "$index" "$item" > /dev/tty
+        index=$((index + 1))
+    done
+    choice="$(read_tty "Choose source Node folder" "1")"
+    if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#nodes[@]} )); then
+        selected="${nodes[choice-1]}"
+    else
+        selected="$choice"
+    fi
+    safe_recovery_name "$selected" || { error "Unsafe Node folder name rejected."; return 1; }
+    printf '%s' "$selected"
+}
+
+select_remote_server() {
+    local node="$1" base="$RCLONE_REMOTE:$DRIVE_ROOT/Nodes/$node/Servers"
+    local choice item index=1 selected=""
+    local -a servers=()
+    mapfile -t servers < <(rclone_cmd lsf "$base" --dirs-only 2>/dev/null | sed 's:/$::' | sort)
+    ((${#servers[@]} > 0)) || { error "No server backup folders found for $node."; return 1; }
+    printf '%b\n' "${WHITE}Available server backup folders:${RESET}" > /dev/tty
+    for item in "${servers[@]}"; do
+        printf '  %2d) %s\n' "$index" "$item" > /dev/tty
+        index=$((index + 1))
+    done
+    choice="$(read_tty "Choose server" "1")"
+    if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#servers[@]} )); then
+        selected="${servers[choice-1]}"
+    else
+        selected="$choice"
+    fi
+    safe_recovery_name "$selected" || { error "Unsafe server folder name rejected."; return 1; }
+    printf '%s' "$selected"
+}
+
+select_recovery_scope() {
+    local choice
+    printf '%b\n' "${WHITE}1)${RESET} Complete Panel (files + database)" > /dev/tty
+    printf '%b\n' "${WHITE}2)${RESET} Panel files only" > /dev/tty
+    printf '%b\n' "${WHITE}3)${RESET} Database only" > /dev/tty
+    printf '%b\n' "${WHITE}4)${RESET} Complete Node (all dated servers + configuration)" > /dev/tty
+    printf '%b\n' "${WHITE}5)${RESET} All dated server volumes only" > /dev/tty
+    printf '%b\n' "${WHITE}6)${RESET} Node configuration only" > /dev/tty
+    printf '%b\n' "${WHITE}7)${RESET} One server only" > /dev/tty
+    printf '%b\n' "${WHITE}8)${RESET} Everything (Panel + database + complete Node)" > /dev/tty
+    choice="$(read_tty "Choose recovery scope [1-8]" "1")"
+    case "$choice" in
+        1) printf panel_all ;;
+        2) printf panel ;;
+        3) printf database ;;
+        4) printf node_all ;;
+        5) printf node_servers ;;
+        6) printf node_config ;;
+        7) printf server ;;
+        8) printf everything ;;
+        *) error "Invalid recovery scope."; return 1 ;;
+    esac
+}
+
+scope_has_panel() { [[ "$1" == panel || "$1" == panel_all || "$1" == everything ]]; }
+scope_has_database() { [[ "$1" == database || "$1" == panel_all || "$1" == everything ]]; }
+scope_has_servers() { [[ "$1" == server || "$1" == node_servers || "$1" == node_all || "$1" == everything ]]; }
+scope_has_node_config() { [[ "$1" == node_config || "$1" == node_all || "$1" == everything ]]; }
+
+prepare_recovery_downloads() {
+    local scope="$1" timestamp="$2" remote_node="$3" selected_server="$4" stage="$5"
+    local source_dir="$stage/source" remote folder uuid local_file found=0
+    install -d -m 700 "$source_dir/servers"
+    : > "$source_dir/servers.tsv"
+
+    if scope_has_panel "$scope"; then
+        remote="$RCLONE_REMOTE:$DRIVE_ROOT/Panel/$timestamp/panel_files.tar.gz"
+        download_recovery_file "$remote" "$source_dir/panel_files.tar.gz" tar || return 1
+        tar -tzf "$source_dir/panel_files.tar.gz" | grep '^pterodactyl/' >/dev/null || {
+            error "Panel archive does not contain the expected pterodactyl directory."
+            return 1
+        }
+    fi
+    if scope_has_database "$scope"; then
+        remote="$RCLONE_REMOTE:$DRIVE_ROOT/Database/$timestamp/panel_database.sql.gz"
+        download_recovery_file "$remote" "$source_dir/panel_database.sql.gz" database || return 1
+    fi
+    if scope_has_node_config "$scope"; then
+        remote="$RCLONE_REMOTE:$DRIVE_ROOT/Nodes/$remote_node/Node-Configuration/$timestamp/node_configuration.tar.gz"
+        download_recovery_file "$remote" "$source_dir/node_configuration.tar.gz" tar || return 1
+        tar -tzf "$source_dir/node_configuration.tar.gz" | \
+            grep -E '^(\./)?pterodactyl/config\.yml$' >/dev/null || {
+            error "Node configuration archive does not contain pterodactyl/config.yml."
+            return 1
+        }
+    fi
+    if scope_has_servers "$scope"; then
+        local -a folders=()
+        if [[ "$scope" == "server" ]]; then
+            folders=("$selected_server")
+        else
+            mapfile -t folders < <(rclone_cmd lsf "$RCLONE_REMOTE:$DRIVE_ROOT/Nodes/$remote_node/Servers" \
+                --dirs-only 2>/dev/null | sed 's:/$::' | sort)
+        fi
+        for folder in "${folders[@]}"; do
+            safe_recovery_name "$folder" || continue
+            remote="$RCLONE_REMOTE:$DRIVE_ROOT/Nodes/$remote_node/Servers/$folder/$timestamp.tar.gz"
+            drive_file_exists "$remote" || continue
+            uuid="$(grep -Eo '[A-Fa-f0-9]{8}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{12}' <<< "$folder" | head -n1)"
+            valid_server_uuid "$uuid" || { warn "Could not identify server UUID in $folder; skipped."; continue; }
+            local_file="$source_dir/servers/${uuid}.tar.gz"
+            download_recovery_file "$remote" "$local_file" tar || return 1
+            tar -tzf "$local_file" | grep "^${uuid}/" >/dev/null || {
+                error "Server archive root does not match UUID $uuid."
+                return 1
+            }
+            printf '%s\t%s\t%s\n' "$uuid" "$folder" "$local_file" >> "$source_dir/servers.tsv"
+            found=$((found + 1))
+        done
+        (( found > 0 )) || { error "No server archives exist for $timestamp in the selected Node folder."; return 1; }
+    fi
+    ok "All selected recovery archives were downloaded and validated before making changes."
+}
+
+dump_current_database_local() {
+    local output_gz="$1" work_dir="$2" env_file="/var/www/pterodactyl/.env"
+    [[ -f "$env_file" ]] || return 2
+    local dump_cmd db_host db_port db_name db_user db_password cnf sql error_file dump_ok=0
+    local -a options
+    dump_cmd="$(command -v mysqldump || command -v mariadb-dump || true)"
+    [[ -n "$dump_cmd" ]] || return 1
+    db_host="$(env_value "$env_file" DB_HOST)"; [[ -n "$db_host" ]] || db_host="127.0.0.1"
+    db_port="$(env_value "$env_file" DB_PORT)"; [[ "$db_port" =~ ^[0-9]+$ ]] || db_port="3306"
+    db_name="$(env_value "$env_file" DB_DATABASE)"
+    db_user="$(env_value "$env_file" DB_USERNAME)"
+    db_password="$(env_value "$env_file" DB_PASSWORD)"
+    [[ -n "$db_name" && -n "$db_user" ]] || return 1
+    install -d -m 700 "$work_dir" "$(dirname "$output_gz")"
+    cnf="$work_dir/safety-mysql.cnf"; sql="${output_gz%.gz}"; error_file="$work_dir/safety-db-error.log"
+    umask 077
+    {
+        printf '[client]\n'
+        printf 'host=%s\nport=%s\nuser=%s\npassword=%s\n' "$db_host" "$db_port" "$db_user" "$db_password"
+    } > "$cnf"
+    options=(--single-transaction --quick --routines --triggers --events --hex-blob "$db_name")
+    if "$dump_cmd" --defaults-extra-file="$cnf" "${options[@]}" > "$sql" 2> "$error_file" && [[ -s "$sql" ]]; then
+        dump_ok=1
+    elif [[ "$db_host" == "127.0.0.1" || "$db_host" == "localhost" || "$db_host" == "::1" ]] && \
+         [[ ${EUID:-$(id -u)} -eq 0 ]]; then
+        : > "$sql"
+        "$dump_cmd" --protocol=socket --user=root "${options[@]}" > "$sql" 2>> "$error_file" && \
+            [[ -s "$sql" ]] && dump_ok=1
+    fi
+    rm -f "$cnf" "$error_file"
+    if (( dump_ok )); then
+        gzip -f "$sql"
+        [[ "$sql.gz" == "$output_gz" ]] || mv -f "$sql.gz" "$output_gz"
+        return 0
+    fi
+    rm -f "$sql" "$output_gz"
+    return 1
+}
+
+safety_upload_keep() {
+    local local_file="$1" remote="$2" checksum_file local_size remote_size
+    [[ "$remote" == "$RCLONE_REMOTE:$DRIVE_ROOT/Manual-Safety/"* ]] || {
+        error "Rejected unsafe Manual-Safety destination."
+        return 1
+    }
+    [[ -f "$local_file" ]] || return 1
+    checksum_file="${local_file}.sha256"
+    sha256sum "$local_file" | awk -v name="$(basename "$remote")" '{print $1 "  " name}' > "$checksum_file"
+    rclone_cmd copyto "$local_file" "$remote" --retries 3 --low-level-retries 10 \
+        --log-file "$RECOVERY_LOG" || return 1
+    rclone_cmd copyto "$checksum_file" "${remote}.sha256" --retries 3 \
+        --log-file "$RECOVERY_LOG" || return 1
+    local_size="$(stat -c '%s' "$local_file")"
+    remote_size="$(drive_file_size "$remote")"
+    [[ "$local_size" == "$remote_size" ]]
+}
+
+safety_upload_marker() {
+    local marker="$1" remote="$2"
+    : > "$marker"
+    [[ "$remote" == "$RCLONE_REMOTE:$DRIVE_ROOT/Manual-Safety/"* ]] || return 1
+    rclone_cmd copyto "$marker" "$remote" --retries 3 --log-file "$RECOVERY_LOG"
+}
+
+create_manual_safety_snapshot() {
+    local scope="$1" operation_id="$2" stage="$3" safety="$stage/safety"
+    local host manual_root archive tar_status uuid folder source_file current_dir config_stage
+    local db_result manifest
+    host="$(sanitize_name "$(hostname)")"
+    manual_root="$RCLONE_REMOTE:$DRIVE_ROOT/Manual-Safety/$host/$operation_id/$scope"
+    install -d -m 700 "$safety/servers"
+    : > "$safety/running_servers.txt"
+    step "Creating mandatory Manual-Safety snapshot"
+
+    if scope_has_panel "$scope"; then
+        if [[ -d /var/www/pterodactyl ]]; then
+            enough_temp_space /var/www/pterodactyl || return 1
+            archive="$safety/panel_files.tar.gz"
+            tar --warning=no-file-changed -czf "$archive" -C /var/www pterodactyl
+            tar_status=$?
+            (( tar_status <= 1 )) && [[ -s "$archive" ]] || return 1
+            safety_upload_keep "$archive" "$manual_root/panel/panel_files.tar.gz" || return 1
+        else
+            safety_upload_marker "$safety/panel.absent" "$manual_root/panel/ABSENT" || return 1
+        fi
+    fi
+
+    if scope_has_database "$scope"; then
+        dump_current_database_local "$safety/panel_database.sql.gz" "$safety/db-work"
+        db_result=$?
+        if (( db_result == 0 )); then
+            safety_upload_keep "$safety/panel_database.sql.gz" "$manual_root/database/panel_database.sql.gz" || return 1
+        elif (( db_result == 2 )); then
+            safety_upload_marker "$safety/database.absent" "$manual_root/database/ABSENT" || return 1
+        else
+            error "Current database safety dump failed. Recovery was cancelled before modifying anything."
+            return 1
+        fi
+    fi
+
+    if scope_has_servers "$scope"; then
+        while IFS=$'\t' read -r uuid folder source_file; do
+            valid_server_uuid "$uuid" || return 1
+            current_dir="/var/lib/pterodactyl/volumes/$uuid"
+            if command -v docker >/dev/null 2>&1 && \
+               [[ "$(docker inspect -f '{{.State.Running}}' "$uuid" 2>/dev/null || true)" == "true" ]]; then
+                printf '%s\n' "$uuid" >> "$safety/running_servers.txt"
+            fi
+            if [[ -d "$current_dir" ]]; then
+                enough_temp_space "$current_dir" || return 1
+                archive="$safety/servers/$uuid.tar.gz"
+                tar --warning=no-file-changed -czf "$archive" -C /var/lib/pterodactyl/volumes "$uuid"
+                tar_status=$?
+                (( tar_status <= 1 )) && [[ -s "$archive" ]] || return 1
+                safety_upload_keep "$archive" "$manual_root/node/servers/$uuid.tar.gz" || return 1
+            else
+                safety_upload_marker "$safety/servers/$uuid.absent" "$manual_root/node/servers/$uuid.ABSENT" || return 1
+            fi
+        done < "$stage/source/servers.tsv"
+        safety_upload_keep "$safety/running_servers.txt" "$manual_root/node/running_servers.txt" || return 1
+    fi
+
+    if scope_has_node_config "$scope"; then
+        if [[ -d /etc/pterodactyl ]]; then
+            config_stage="$safety/node-config-stage"
+            install -d -m 700 "$config_stage"
+            cp -a /etc/pterodactyl "$config_stage/"
+            [[ -f /etc/docker/daemon.json ]] && { mkdir -p "$config_stage/docker"; cp -a /etc/docker/daemon.json "$config_stage/docker/"; }
+            [[ -f /etc/systemd/system/wings.service ]] && cp -a /etc/systemd/system/wings.service "$config_stage/"
+            archive="$safety/node_configuration.tar.gz"
+            tar -czf "$archive" -C "$config_stage" . || return 1
+            safety_upload_keep "$archive" "$manual_root/node/node_configuration.tar.gz" || return 1
+        else
+            safety_upload_marker "$safety/node_configuration.absent" "$manual_root/node/configuration.ABSENT" || return 1
+        fi
+    fi
+
+    manifest="$safety/manifest.json"
+    jq -n --arg operation_id "$operation_id" --arg scope "$scope" --arg host "$(hostname)" \
+        --arg created "$(date --iso-8601=seconds)" --arg source_date "$(jq -r '.source_timestamp // ""' "$RECOVERY_STATE_FILE" 2>/dev/null || true)" \
+        '{operation_id:$operation_id,scope:$scope,hostname:$host,created_at:$created,source_timestamp:$source_date,purpose:"automatic pre-recovery rollback snapshot"}' \
+        > "$manifest"
+    safety_upload_keep "$manifest" "$manual_root/manifest.json" || return 1
+    ok "Manual-Safety snapshot uploaded and retained at $manual_root"
+}
+
+write_recovery_state() {
+    local mode="$1" scope="$2" source_timestamp="$3" remote_node="$4" selected_server="$5"
+    local operation_id="$6" stage="$7" status="$8" temp
+    temp="$(mktemp)"
+    jq -n --arg mode "$mode" --arg scope "$scope" --arg source_timestamp "$source_timestamp" \
+        --arg remote_node "$remote_node" --arg selected_server "$selected_server" \
+        --arg operation_id "$operation_id" --arg stage "$stage" --arg status "$status" \
+        --arg updated "$(date --iso-8601=seconds)" \
+        '{mode:$mode,scope:$scope,source_timestamp:$source_timestamp,remote_node:$remote_node,selected_server:$selected_server,operation_id:$operation_id,stage:$stage,status:$status,updated_at:$updated}' \
+        > "$temp"
+    mv -f "$temp" "$RECOVERY_STATE_FILE"
+    chmod 600 "$RECOVERY_STATE_FILE"
+}
+
+update_recovery_status() {
+    local status="$1" temp
+    [[ -f "$RECOVERY_STATE_FILE" ]] || return 1
+    temp="$(mktemp)"
+    jq --arg status "$status" --arg updated "$(date --iso-8601=seconds)" \
+        '.status=$status | .updated_at=$updated' "$RECOVERY_STATE_FILE" > "$temp" && \
+        mv -f "$temp" "$RECOVERY_STATE_FILE"
+    chmod 600 "$RECOVERY_STATE_FILE"
+}
+
+recovery_preflight() {
+    local mode="$1" scope="$2" failures=0
+    step "Running destructive-operation preflight"
+    command -v systemctl >/dev/null 2>&1 || { error "systemd is required for safe service control."; failures=$((failures + 1)); }
+    if scope_has_panel "$scope" || scope_has_database "$scope"; then
+        command -v php >/dev/null 2>&1 || { error "PHP CLI is required on the destination."; failures=$((failures + 1)); }
+        command -v mysql >/dev/null 2>&1 || command -v mariadb >/dev/null 2>&1 || {
+            error "MySQL/MariaDB client is required on the destination."
+            failures=$((failures + 1))
+        }
+        [[ -d /var/www ]] || install -d -m 755 /var/www
+        if [[ "$scope" == "database" && ! -f /var/www/pterodactyl/.env ]]; then
+            error "Database-only recovery needs the destination Panel .env file."
+            failures=$((failures + 1))
+        fi
+    fi
+    if scope_has_servers "$scope" || scope_has_node_config "$scope"; then
+        command -v docker >/dev/null 2>&1 || { error "Docker is required for Node recovery."; failures=$((failures + 1)); }
+        command -v wings >/dev/null 2>&1 || { error "Wings must already be installed on the destination VPS."; failures=$((failures + 1)); }
+        install -d -m 755 /var/lib/pterodactyl/volumes
+        if [[ "$mode" == "shift" ]]; then
+            warn "Shift mode restores a replacement Node identity. The old VPS Wings service must not run simultaneously."
+        fi
+    fi
+    (( failures == 0 )) || return 1
+    ok "Destination preflight passed."
+}
+
+stop_recovery_services() {
+    local scope="$1"
+    if scope_has_panel "$scope" || scope_has_database "$scope"; then
+        [[ -f /var/www/pterodactyl/artisan ]] && \
+            (cd /var/www/pterodactyl && php artisan down --no-interaction >/dev/null 2>&1) || true
+        systemctl stop pteroq >/dev/null 2>&1 || true
+    fi
+    if scope_has_servers "$scope" || scope_has_node_config "$scope"; then
+        systemctl stop wings >/dev/null 2>&1 || true
+    fi
+}
+
+restore_panel_files_local() {
+    local archive="$1" operation_id="$2" stage="$3"
+    local rollback="$stage/rollback/pterodactyl-original"
+    install -d -m 700 "$stage/rollback"
+    if [[ -d /var/www/pterodactyl ]]; then
+        mv /var/www/pterodactyl "$rollback" || return 1
+    else
+        : > "$stage/rollback/panel.was-absent"
+    fi
+    if ! tar -xzf "$archive" -C /var/www; then
+        error "Panel archive extraction failed."
+        return 1
+    fi
+    [[ -f /var/www/pterodactyl/.env && -f /var/www/pterodactyl/artisan ]] || {
+        error "Restored Panel files are incomplete."
+        return 1
+    }
+    local web_user="www-data"
+    id -u www-data >/dev/null 2>&1 || { id -u nginx >/dev/null 2>&1 && web_user="nginx"; }
+    chown -R "$web_user:$web_user" /var/www/pterodactyl
+    chmod -R 755 /var/www/pterodactyl/storage /var/www/pterodactyl/bootstrap/cache 2>/dev/null || true
+    ok "Panel files restored from selected backup."
+}
+
+drop_database_by_name() {
+    local db_name="$1" mysql_cmd
+    [[ "$db_name" =~ ^[A-Za-z0-9_]+$ ]] || return 1
+    mysql_cmd="$(command -v mariadb || command -v mysql || true)"
+    [[ -n "$mysql_cmd" ]] || return 1
+    "$mysql_cmd" --protocol=socket --user=root -e "DROP DATABASE IF EXISTS \`$db_name\`;" >/dev/null 2>&1
+}
+
+sql_literal_escape() {
+    local value="$1"
+    value="${value//\\/\\\\}"
+    value="${value//\'/\'\'}"
+    printf '%s' "$value"
+}
+
+restore_database_local() {
+    local archive="$1" stage="$2" exact="${3:-1}" env_file="/var/www/pterodactyl/.env"
+    [[ -f "$env_file" ]] || { error "Panel .env is required to identify the destination database."; return 1; }
+    local mysql_cmd db_host db_port db_name db_user db_password escaped_password cnf root_socket=0 account_host
+    mysql_cmd="$(command -v mariadb || command -v mysql || true)"
+    [[ -n "$mysql_cmd" ]] || return 1
+    db_host="$(env_value "$env_file" DB_HOST)"; [[ -n "$db_host" ]] || db_host="127.0.0.1"
+    db_port="$(env_value "$env_file" DB_PORT)"; [[ "$db_port" =~ ^[0-9]+$ ]] || db_port="3306"
+    db_name="$(env_value "$env_file" DB_DATABASE)"
+    db_user="$(env_value "$env_file" DB_USERNAME)"
+    db_password="$(env_value "$env_file" DB_PASSWORD)"
+    [[ "$db_name" =~ ^[A-Za-z0-9_]+$ && "$db_user" =~ ^[A-Za-z0-9_.-]+$ ]] || {
+        error "Unsafe or incomplete database configuration."
+        return 1
+    }
+    printf '%s\n' "$db_name" > "$stage/restored-database-name"
+
+    if [[ "$db_host" == "127.0.0.1" || "$db_host" == "localhost" || "$db_host" == "::1" ]] && \
+       "$mysql_cmd" --protocol=socket --user=root -e 'SELECT 1;' >/dev/null 2>&1; then
+        root_socket=1
+    fi
+    if (( root_socket )); then
+        if [[ "$exact" == "1" ]]; then
+            "$mysql_cmd" --protocol=socket --user=root \
+                -e "DROP DATABASE IF EXISTS \`$db_name\`; CREATE DATABASE \`$db_name\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" || return 1
+        else
+            "$mysql_cmd" --protocol=socket --user=root \
+                -e "CREATE DATABASE IF NOT EXISTS \`$db_name\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" || return 1
+        fi
+        escaped_password="$(sql_literal_escape "$db_password")"
+        for account_host in 127.0.0.1 localhost; do
+            "$mysql_cmd" --protocol=socket --user=root -e \
+                "CREATE USER IF NOT EXISTS '$db_user'@'$account_host' IDENTIFIED BY '$escaped_password'; ALTER USER '$db_user'@'$account_host' IDENTIFIED BY '$escaped_password'; GRANT ALL PRIVILEGES ON \`$db_name\`.* TO '$db_user'@'$account_host';" || return 1
+        done
+        "$mysql_cmd" --protocol=socket --user=root -e 'FLUSH PRIVILEGES;' || return 1
+        if ! gzip -dc "$archive" | "$mysql_cmd" --protocol=socket --user=root "$db_name"; then
+            error "Database import through local root socket failed."
+            return 1
+        fi
+    else
+        cnf="$stage/restore-mysql.cnf"
+        umask 077
+        {
+            printf '[client]\n'
+            printf 'host=%s\nport=%s\nuser=%s\npassword=%s\n' "$db_host" "$db_port" "$db_user" "$db_password"
+        } > "$cnf"
+        if ! gzip -dc "$archive" | "$mysql_cmd" --defaults-extra-file="$cnf" "$db_name"; then
+            rm -f "$cnf"
+            error "Database import with Panel credentials failed."
+            return 1
+        fi
+        rm -f "$cnf"
+    fi
+    ok "Panel database restored successfully."
+}
+
+restore_node_configuration_local() {
+    local archive="$1" operation_id="$2" stage="$3" extracted="$stage/node-config-restored"
+    local rollback="/etc/pterodactyl.rhm-rollback-$operation_id"
+    install -d -m 700 "$extracted"
+    tar -xzf "$archive" -C "$extracted" || return 1
+    [[ -d "$extracted/pterodactyl" ]] || { error "Node configuration archive is missing pterodactyl/config.yml."; return 1; }
+    if [[ -d /etc/pterodactyl ]]; then
+        mv /etc/pterodactyl "$rollback" || return 1
+    else
+        : > "$stage/rollback/node-config.was-absent"
+    fi
+    mv "$extracted/pterodactyl" /etc/pterodactyl || return 1
+    chmod 600 /etc/pterodactyl/config.yml 2>/dev/null || true
+    if [[ -f "$extracted/wings.service" ]]; then
+        cp -a "$extracted/wings.service" /etc/systemd/system/wings.service
+    fi
+    if [[ -f "$extracted/docker/daemon.json" ]]; then
+        install -d -m 755 /etc/docker
+        cp -a "$extracted/docker/daemon.json" /etc/docker/daemon.json
+        systemctl restart docker >/dev/null 2>&1 || return 1
+    fi
+    systemctl daemon-reload
+    ok "Node/Wings configuration restored."
+}
+
+restore_server_volumes_local() {
+    local stage="$1" operation_id="$2" uuid folder archive rollback
+    while IFS=$'\t' read -r uuid folder archive; do
+        valid_server_uuid "$uuid" && [[ "$archive" == "$stage/source/servers/"* ]] || return 1
+        docker stop -t 60 "$uuid" >/dev/null 2>&1 || true
+        rollback="/var/lib/pterodactyl/volumes/${uuid}.rhm-rollback-$operation_id"
+        [[ -e "$rollback" ]] && { error "Rollback directory already exists for $uuid."; return 1; }
+        if [[ -d "/var/lib/pterodactyl/volumes/$uuid" ]]; then
+            mv "/var/lib/pterodactyl/volumes/$uuid" "$rollback" || return 1
+        else
+            : > "$stage/rollback/server-$uuid.was-absent"
+        fi
+        if ! tar -xzf "$archive" -C /var/lib/pterodactyl/volumes; then
+            error "Failed to extract server volume $uuid."
+            return 1
+        fi
+        [[ -d "/var/lib/pterodactyl/volumes/$uuid" ]] || return 1
+        ok "Server volume restored: $folder"
+    done < "$stage/source/servers.tsv"
+}
+
+start_recovery_services() {
+    local scope="$1" stage="$2" uuid
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    if scope_has_panel "$scope" || scope_has_database "$scope"; then
+        if [[ -f /var/www/pterodactyl/artisan ]]; then
+            (cd /var/www/pterodactyl && php artisan optimize:clear --no-interaction >/dev/null 2>&1) || true
+            (cd /var/www/pterodactyl && php artisan queue:restart --no-interaction >/dev/null 2>&1) || true
+            (cd /var/www/pterodactyl && php artisan up --no-interaction >/dev/null 2>&1) || true
+        fi
+        systemctl enable --now pteroq >/dev/null 2>&1 || true
+    fi
+    if scope_has_servers "$scope" || scope_has_node_config "$scope"; then
+        systemctl enable --now wings >/dev/null 2>&1 || return 1
+        if [[ -f "$stage/safety/running_servers.txt" ]]; then
+            while IFS= read -r uuid; do
+                valid_server_uuid "$uuid" && docker start "$uuid" >/dev/null 2>&1 || true
+            done < "$stage/safety/running_servers.txt"
+        fi
+    fi
+}
+
+recovery_health_check() {
+    local scope="$1" stage="$2" failures=0 uuid folder archive
+    if scope_has_panel "$scope"; then
+        [[ -f /var/www/pterodactyl/artisan && -f /var/www/pterodactyl/.env ]] || failures=$((failures + 1))
+    fi
+    if scope_has_database "$scope"; then
+        if [[ -f /var/www/pterodactyl/artisan ]]; then
+            (cd /var/www/pterodactyl && php artisan migrate:status --no-ansi >/dev/null 2>&1) || failures=$((failures + 1))
+        else
+            failures=$((failures + 1))
+        fi
+    fi
+    if (scope_has_panel "$scope" || scope_has_database "$scope") && \
+       systemctl list-unit-files pteroq.service --no-legend 2>/dev/null | grep -q '^pteroq.service'; then
+        systemctl is-active --quiet pteroq || failures=$((failures + 1))
+    fi
+    if scope_has_node_config "$scope"; then
+        systemctl is-active --quiet wings || failures=$((failures + 1))
+        [[ -f /etc/pterodactyl/config.yml ]] || failures=$((failures + 1))
+    fi
+    if scope_has_servers "$scope"; then
+        while IFS=$'\t' read -r uuid folder archive; do
+            [[ -d "/var/lib/pterodactyl/volumes/$uuid" ]] || failures=$((failures + 1))
+        done < "$stage/source/servers.tsv"
+    fi
+    (( failures == 0 )) || { error "$failures post-recovery health check(s) failed."; return 1; }
+    ok "All post-recovery health checks passed."
+}
+
+rollback_recovery() {
+    [[ -f "$RECOVERY_STATE_FILE" ]] || { error "No recovery state is available."; return 1; }
+    local scope operation_id stage uuid folder archive rollback current_db=""
+    scope="$(jq -r '.scope' "$RECOVERY_STATE_FILE")"
+    operation_id="$(jq -r '.operation_id' "$RECOVERY_STATE_FILE")"
+    stage="$(jq -r '.stage' "$RECOVERY_STATE_FILE")"
+    valid_recovery_timestamp "$operation_id" || { error "Unsafe rollback operation ID."; return 1; }
+    [[ "$stage" == "$TMP_ROOT/recovery-$operation_id" && -d "$stage" ]] || { error "Local rollback workspace is unavailable."; return 1; }
+    step "Rolling back the last recovery operation"
+    stop_recovery_services "$scope"
+    [[ -f /var/www/pterodactyl/.env ]] && current_db="$(env_value /var/www/pterodactyl/.env DB_DATABASE)"
+
+    if scope_has_panel "$scope"; then
+        rm -rf -- /var/www/pterodactyl
+        if [[ -d "$stage/rollback/pterodactyl-original" ]]; then
+            mv "$stage/rollback/pterodactyl-original" /var/www/pterodactyl || return 1
+        fi
+    fi
+    if scope_has_database "$scope"; then
+        if [[ -f "$stage/safety/panel_database.sql.gz" ]]; then
+            restore_database_local "$stage/safety/panel_database.sql.gz" "$stage" 1 || return 1
+        elif [[ -f "$stage/safety/database.absent" && -n "$current_db" ]]; then
+            drop_database_by_name "$current_db" || warn "Could not remove the newly restored database automatically."
+        fi
+    fi
+    if scope_has_servers "$scope"; then
+        while IFS=$'\t' read -r uuid folder archive; do
+            valid_server_uuid "$uuid" || return 1
+            rm -rf -- "/var/lib/pterodactyl/volumes/$uuid"
+            rollback="/var/lib/pterodactyl/volumes/${uuid}.rhm-rollback-$operation_id"
+            [[ -d "$rollback" ]] && mv "$rollback" "/var/lib/pterodactyl/volumes/$uuid"
+        done < "$stage/source/servers.tsv"
+    fi
+    if scope_has_node_config "$scope"; then
+        rm -rf -- /etc/pterodactyl
+        rollback="/etc/pterodactyl.rhm-rollback-$operation_id"
+        [[ -d "$rollback" ]] && mv "$rollback" /etc/pterodactyl
+        if [[ -f "$stage/safety/node_configuration.tar.gz" ]]; then
+            local extracted="$stage/safety/node-config-rollback"
+            install -d -m 700 "$extracted"
+            tar -xzf "$stage/safety/node_configuration.tar.gz" -C "$extracted" || return 1
+            [[ -f "$extracted/wings.service" ]] && cp -a "$extracted/wings.service" /etc/systemd/system/wings.service
+            [[ -f "$extracted/docker/daemon.json" ]] && cp -a "$extracted/docker/daemon.json" /etc/docker/daemon.json
+            [[ -f "$extracted/docker/daemon.json" ]] && systemctl restart docker >/dev/null 2>&1 || true
+        fi
+    fi
+    start_recovery_services "$scope" "$stage" || true
+    update_recovery_status "rolled-back"
+    ok "Rollback completed. Manual-Safety copy remains in Google Drive."
+}
+
+cleanup_recovery_success() {
+    local scope="$1" operation_id="$2" stage="$3" uuid folder archive rollback
+    [[ "$stage" == "$TMP_ROOT/recovery-$operation_id" ]] || return 1
+    [[ -d "$stage/rollback/pterodactyl-original" ]] && rm -rf -- "$stage/rollback/pterodactyl-original"
+    if scope_has_servers "$scope"; then
+        while IFS=$'\t' read -r uuid folder archive; do
+            valid_server_uuid "$uuid" || return 1
+            rollback="/var/lib/pterodactyl/volumes/${uuid}.rhm-rollback-$operation_id"
+            [[ -d "$rollback" ]] && rm -rf -- "$rollback"
+        done < "$stage/source/servers.tsv"
+    fi
+    rollback="/etc/pterodactyl.rhm-rollback-$operation_id"
+    [[ -d "$rollback" ]] && rm -rf -- "$rollback"
+    update_recovery_status "success"
+    rm -rf -- "$stage"
+}
+
+run_recovery() {
+    local mode="$1" scope timestamp remote_node="" selected_server="" operation_id stage confirmation result=0
+    local previous_status previous_stage
+    [[ "$mode" == "restore" || "$mode" == "shift" ]] || return 1
+    load_config
+    ensure_dirs
+    exec 9>"$LOCK_FILE"
+    if ! flock -n 9; then
+        error "Another backup/recovery task is already running."
+        return 1
+    fi
+    if [[ -f "$RECOVERY_STATE_FILE" ]] && jq -e . "$RECOVERY_STATE_FILE" >/dev/null 2>&1; then
+        previous_status="$(jq -r '.status // "unknown"' "$RECOVERY_STATE_FILE")"
+        previous_stage="$(jq -r '.stage // ""' "$RECOVERY_STATE_FILE")"
+        case "$previous_status" in
+            failed|applying|interrupted)
+                if [[ "$previous_stage" == "$TMP_ROOT/recovery-"* && -d "$previous_stage" ]]; then
+                    error "A preserved $previous_status recovery must be rolled back before starting another operation."
+                    info "Choose manager option 16 or run: $INSTALL_PATH --rollback"
+                    return 1
+                fi
+                ;;
+        esac
+    fi
+    if ! rclone_cmd lsd "$RCLONE_REMOTE:$DRIVE_ROOT" --contimeout 10s --timeout 30s >/dev/null 2>&1; then
+        error "Google Drive or $DRIVE_ROOT is unavailable."
+        return 1
+    fi
+
+    banner
+    if [[ "$mode" == "shift" ]]; then
+        step "SHIFT BACKUP — Google Drive migration to this VPS"
+        warn "Run this on the destination VPS. Source VPS data will not be modified."
+        warn "For a Node replacement, stop/power off old Wings before activating this destination."
+    else
+        step "RESTORE BACKUP — transactional recovery on this VPS"
+    fi
+    scope="$(select_recovery_scope)" || return 1
+    timestamp="$(select_restore_point)" || return 1
+    if scope_has_servers "$scope" || scope_has_node_config "$scope"; then
+        remote_node="$(select_remote_node)" || return 1
+    fi
+    if [[ "$scope" == "server" ]]; then
+        selected_server="$(select_remote_server "$remote_node")" || return 1
+    fi
+
+    printf '\n%b\n' "${WHITE}Operation summary:${RESET}"
+    printf '  Mode:          %s\n' "$mode"
+    printf '  Scope:         %s\n' "$scope"
+    printf '  Backup date:   %s\n' "$timestamp"
+    [[ -n "$remote_node" ]] && printf '  Source Node:   %s\n' "$remote_node"
+    [[ -n "$selected_server" ]] && printf '  Server:        %s\n' "$selected_server"
+    if ! confirm "Download and validate this recovery point?" "y"; then
+        info "Recovery cancelled without changing anything."
+        return 0
+    fi
+
+    operation_id="$(date '+%Y-%m-%d_%H-%M-%S')"
+    stage="$TMP_ROOT/recovery-$operation_id"
+    install -d -m 700 "$stage/rollback"
+    write_recovery_state "$mode" "$scope" "$timestamp" "$remote_node" "$selected_server" \
+        "$operation_id" "$stage" "downloading"
+
+    if ! prepare_recovery_downloads "$scope" "$timestamp" "$remote_node" "$selected_server" "$stage"; then
+        update_recovery_status "download-failed"
+        rm -rf -- "$stage"
+        error "Recovery stopped before touching live data."
+        return 1
+    fi
+    if ! recovery_preflight "$mode" "$scope"; then
+        update_recovery_status "preflight-failed"
+        rm -rf -- "$stage"
+        error "Destination is not safely prepared; no live data was changed."
+        return 1
+    fi
+    update_recovery_status "creating-safety-snapshot"
+    if ! create_manual_safety_snapshot "$scope" "$operation_id" "$stage"; then
+        update_recovery_status "safety-snapshot-failed"
+        rm -rf -- "$stage"
+        error "Manual-Safety snapshot failed, so live restore was blocked."
+        return 1
+    fi
+
+    if [[ "$mode" == "shift" ]]; then
+        confirmation="$(read_tty "Type SHIFT to overwrite selected destination data" "")"
+        [[ "$confirmation" == "SHIFT" ]] || {
+            update_recovery_status "cancelled"
+            rm -rf -- "$stage"
+            info "Shift cancelled. Manual-Safety copy remains in Drive."
+            return 0
+        }
+    else
+        confirmation="$(read_tty "Type RESTORE to overwrite selected live data" "")"
+        [[ "$confirmation" == "RESTORE" ]] || {
+            update_recovery_status "cancelled"
+            rm -rf -- "$stage"
+            info "Restore cancelled. Manual-Safety copy remains in Drive."
+            return 0
+        }
+    fi
+
+    update_recovery_status "applying"
+    stop_recovery_services "$scope"
+    if scope_has_panel "$scope"; then
+        restore_panel_files_local "$stage/source/panel_files.tar.gz" "$operation_id" "$stage" || result=1
+    fi
+    if (( result == 0 )) && scope_has_database "$scope"; then
+        restore_database_local "$stage/source/panel_database.sql.gz" "$stage" 1 || result=1
+    fi
+    if (( result == 0 )) && scope_has_node_config "$scope"; then
+        restore_node_configuration_local "$stage/source/node_configuration.tar.gz" "$operation_id" "$stage" || result=1
+    fi
+    if (( result == 0 )) && scope_has_servers "$scope"; then
+        restore_server_volumes_local "$stage" "$operation_id" || result=1
+    fi
+    if (( result == 0 )); then
+        start_recovery_services "$scope" "$stage" || result=1
+    fi
+    if (( result == 0 )); then
+        recovery_health_check "$scope" "$stage" || result=1
+    fi
+
+    if (( result == 0 )); then
+        cleanup_recovery_success "$scope" "$operation_id" "$stage"
+        send_webhook "✅ **RHM ${mode^} completed**\nHost: **$(hostname)**\nScope: **$scope**\nSource backup: **$timestamp**\nAll post-operation health checks passed. Manual-Safety remains in Drive."
+        ok "${mode^} completed successfully. Manual-Safety rollback snapshot remains in Google Drive."
+        [[ "$mode" == "shift" ]] && warn "Update DNS/IP routing externally if this VPS replaces the old public endpoint."
+        return 0
+    fi
+
+    update_recovery_status "failed"
+    error "${mode^} failed. Local rollback workspace and Drive Manual-Safety snapshot were preserved."
+    send_webhook "$(discord_ping) ❌ **RHM ${mode^} failed**\nHost: **$(hostname)**\nScope: **$scope**\nSource backup: **$timestamp**\nRollback is available in the manager."
+    if confirm "Roll back automatically now?" "y"; then
+        rollback_recovery
+    else
+        start_recovery_services "$scope" "$stage" || true
+        warn "Partial recovery state preserved. Choose 'Rollback last failed operation' from the manager."
+    fi
+    return 1
+}
+
+rollback_last_recovery_menu() {
+    if [[ ! -f "$RECOVERY_STATE_FILE" ]]; then
+        info "No recovery operation is available for rollback."
+        return 0
+    fi
+    local status
+    status="$(jq -r '.status // "unknown"' "$RECOVERY_STATE_FILE")"
+    case "$status" in
+        failed|applying|interrupted)
+            if confirm "Rollback the preserved $status recovery operation now?" "y"; then
+                rollback_recovery
+            fi
+            ;;
+        *) info "Last recovery state is '$status'; no emergency rollback is pending." ;;
+    esac
 }
 
 show_recent_logs() {
@@ -1459,6 +2338,11 @@ show_recent_logs() {
         printf '\n'
         step "Recent server-deletion monitor activity"
         tail -n 15 "$MONITOR_LOG"
+    fi
+    if [[ -s "$RECOVERY_LOG" ]]; then
+        printf '\n'
+        step "Recent restore and shift transfer activity"
+        tail -n 20 "$RECOVERY_LOG"
     fi
 }
 
@@ -1508,6 +2392,9 @@ manager_menu() {
         printf '%b\n' "${WHITE}11)${RESET} 📜 View recent logs"
         printf '%b\n' "${WHITE}12)${RESET} 🔄 Retry failed uploads only"
         printf '%b\n' "${WHITE}13)${RESET} 🗄️  Back up Panel database only"
+        printf '%b\n' "${WHITE}14)${RESET} ♻️  Restore a backup"
+        printf '%b\n' "${WHITE}15)${RESET} 🚚 Shift backup to this VPS"
+        printf '%b\n' "${WHITE}16)${RESET} 🛟 Roll back last failed restore/shift"
         printf '%b\n' "${WHITE}0)${RESET} Exit"
         printf '\n'
         choice="$(read_tty "Select an option" "1")"
@@ -1525,6 +2412,9 @@ manager_menu() {
             11) show_recent_logs ;;
             12) manual_retry_failed_uploads || true ;;
             13) run_database_only || true ;;
+            14) run_recovery restore || true ;;
+            15) run_recovery shift || true ;;
+            16) rollback_last_recovery_menu || true ;;
             0) printf '%b\n' "${PURPLE}Goodbye, Ray. Your backups stay protected. 👋${RESET}"; return 0 ;;
             *) warn "Unknown option." ;;
         esac
@@ -1544,14 +2434,25 @@ main() {
         --database)
             ensure_dirs; load_config; run_database_only
             ;;
+        --restore)
+            ensure_dirs; load_config; install_dependencies || exit 1; run_recovery restore
+            ;;
+        --shift)
+            ensure_dirs; load_config; install_dependencies || exit 1; run_recovery shift
+            ;;
+        --rollback)
+            ensure_dirs; load_config; install_dependencies || exit 1; rollback_last_recovery_menu
+            ;;
         --help)
-            printf 'Usage: %s [--backup|--monitor|--database]\n' "$0"
+            printf 'Usage: %s [--backup|--monitor|--database|--restore|--shift|--rollback]\n' "$0"
             ;;
         "")
             ensure_dirs
             load_config
             if [[ ! -f "$CONFIG_FILE" ]]; then
-                initial_setup
+                initial_setup || exit 1
+                load_config
+                manager_menu
             else
                 install_dependencies || exit 1
                 if [[ "$LEGACY_CLEANUP_DONE" != "1" ]]; then
