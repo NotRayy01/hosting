@@ -22,7 +22,7 @@ readonly TMP_ROOT="/var/tmp/rhm-backup"
 readonly RCLONE_CONFIG="/root/.config/rclone/rclone.conf"
 readonly RCLONE_REMOTE="gdrive"
 readonly DRIVE_ROOT="RHM-Backups"
-readonly SCRIPT_SOURCE_URL="https://raw.githubusercontent.com/NotRayy01/hosting/refs/heads/main/other/backup.sh"
+readonly SCRIPT_SOURCE_URL="https://raw.githubusercontent.com/NotRayy01/hosting/refs/heads/main/backup.sh"
 readonly CRON_FILE="/etc/cron.d/rhm-backup"
 readonly LOGROTATE_FILE="/etc/logrotate.d/rhm-backup"
 readonly LOCK_FILE="/run/lock/rhm-backup.lock"
@@ -743,6 +743,24 @@ resume_automation() {
     ok "Automatic backups resumed."
 }
 
+toggle_backup_notifications() {
+    if [[ "$BACKUP_NOTIFICATIONS" == "1" ]]; then
+        BACKUP_NOTIFICATIONS="0"
+        save_config
+        ok "Routine backup success/error Discord messages are now stopped."
+        info "Server-deletion warnings, cancellation alerts, and lifetime-backup deletion messages remain active."
+    else
+        if [[ -z "$DISCORD_WEBHOOK" ]]; then
+            warn "Add a Discord webhook in option 6 before enabling backup messages."
+            return 1
+        fi
+        BACKUP_NOTIFICATIONS="1"
+        save_config
+        ok "Routine backup success/error Discord messages are active again."
+        info "Server-deletion protection remains active as before."
+    fi
+}
+
 initial_setup() {
     banner
     mini_animation
@@ -782,6 +800,9 @@ initial_setup() {
 send_webhook() {
     local message="$1"
     [[ -n "$DISCORD_WEBHOOK" ]] || return 0
+    # Existing notification templates use literal \n separators. Convert only
+    # those separators to real newlines before JSON encoding for Discord.
+    message="${message//\\n/$'\n'}"
     local payload
     payload="$(jq -cn --arg content "$message" '{content:$content,allowed_mentions:{parse:["users"]}}')"
     curl -fsS --connect-timeout 10 --max-time 25 \
@@ -819,7 +840,7 @@ notify_backup_result() {
         send_webhook "✅ **RHM backup completed**\nHost: **$(hostname)**\nType: **$BACKUP_TYPE**\nTime: **$timestamp**\nDuration: **${duration}s**\nRetention: **$RETENTION_DAYS day(s)**\nAll uploaded archives passed size verification and include SHA-256 checksums."
     else
         ping="$(discord_ping)"
-        send_webhook "$ping ⚠️ **RHM backup completed with errors**\nHost: **$(hostname)**\nType: **$BACKUP_TYPE**\nTime: **$timestamp**\nDuration: **${duration}s**\nLocal recovery archives waiting: **${failed_count:-0}**\nCheck: \`$BACKUP_LOG\`"
+        send_webhook "$ping ⚠️ **RHM backup completed with errors**\nHost: **$(hostname)**\nType: **$BACKUP_TYPE**\nTime: **$timestamp**\nDuration: **${duration}s**\nPending failed uploads: **${failed_count:-0}**\nNote: This number can be 0 when a backup task failed before upload.\nCheck: \`$BACKUP_LOG\`"
     fi
 }
 
@@ -2395,6 +2416,11 @@ manager_menu() {
         printf '%b\n' "${WHITE}14)${RESET} ♻️  Restore a backup"
         printf '%b\n' "${WHITE}15)${RESET} 🚚 Shift backup to this VPS"
         printf '%b\n' "${WHITE}16)${RESET} 🛟 Roll back last failed restore/shift"
+        if [[ "$BACKUP_NOTIFICATIONS" == "1" ]]; then
+            printf '%b\n' "${WHITE}17)${RESET} 🔕 Stop backup Discord messages"
+        else
+            printf '%b\n' "${WHITE}17)${RESET} 🔔 Resume backup Discord messages"
+        fi
         printf '%b\n' "${WHITE}0)${RESET} Exit"
         printf '\n'
         choice="$(read_tty "Select an option" "1")"
@@ -2415,6 +2441,7 @@ manager_menu() {
             14) run_recovery restore || true ;;
             15) run_recovery shift || true ;;
             16) rollback_last_recovery_menu || true ;;
+            17) toggle_backup_notifications || true ;;
             0) printf '%b\n' "${PURPLE}Goodbye, Ray. Your backups stay protected. 👋${RESET}"; return 0 ;;
             *) warn "Unknown option." ;;
         esac
